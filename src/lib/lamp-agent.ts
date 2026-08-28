@@ -15,7 +15,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
   MODEL_FILES, STALE_RUN_MS, LIVE_CONTENT_MAX, LIVE_TAIL_MAX,
-  type AgentStatus, type AgentLogEntry, type AgentLive, isValidId, modelDir, readModel, readModelImage,
+  type AgentStatus, type AgentLogEntry, type AgentLive, isValidId, modelDir, readModel, readModelImage, readModelSkeleton,
 } from './lamp-pipeline.ts';
 
 export const MAX_ROUNDS = 3;
@@ -70,6 +70,8 @@ export interface AgentInput {
   id: string;
   userPrompt: string;
   image: { base64: string; mimeType: string };
+  /** Isolerad printbar del (skelett.jpg) om isoleringssteget lyckades. */
+  skeleton?: { base64: string; mimeType: string } | null;
   examples: { name: string; code: string }[];
 }
 
@@ -197,19 +199,21 @@ export function buildSystemPrompt(examples: { name: string; code: string }[]): s
 }
 
 export function buildFirstMessage(input: AgentInput): ChatMessage {
-  return {
-    role: 'user',
-    content: [
-      {
-        type: 'text',
-        text:
-          `Referensbild på lampskärmen. Kundens önskan: "${input.userPrompt}". ` +
-          'Skriv spec.md och del.py enligt formatet. Uppskatta proportionerna ur bilden; ' +
-          'total höjd ≤ 210 mm, bredd ≤ 200 mm. Ange antalet spjälor/element genom att räkna i bilden.',
-      },
-      { type: 'image_url', image_url: { url: `data:${input.image.mimeType};base64,${input.image.base64}` } },
-    ],
-  };
+  const parts: ContentPart[] = [
+    {
+      type: 'text',
+      text:
+        (input.skeleton
+          ? 'Bild 1: produktfoto av lampan i miljö. Bild 2: BARA den printade delen, isolerad — utgå från bild 2 för formen, bild 1 för sammanhanget. '
+          : 'Referensbild på lampskärmen. ') +
+        `Kundens önskan: "${input.userPrompt}". ` +
+        'Skriv spec.md och del.py enligt formatet. Uppskatta proportionerna ur bilden; ' +
+        'total höjd ≤ 210 mm, bredd ≤ 200 mm. Ange antalet spjälor/element genom att räkna i bilden.',
+    },
+    { type: 'image_url', image_url: { url: `data:${input.image.mimeType};base64,${input.image.base64}` } },
+  ];
+  if (input.skeleton) parts.push({ type: 'image_url', image_url: { url: `data:${input.skeleton.mimeType};base64,${input.skeleton.base64}` } });
+  return { role: 'user', content: parts };
 }
 
 export function buildFeedbackMessage(result: BuildResult, round: number): ChatMessage {
@@ -413,10 +417,9 @@ function textOf(v: unknown): string {
   return '';
 }
 
-function lastLine(s: string): string {
-  const lines = s.trimEnd().split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) { const l = lines[i].trim(); if (l) return l.slice(-LIVE_TAIL_MAX); }
-  return '';
+/** Sista ~LIVE_TAIL_MAX tecknen av resonemanget som en rad — sista raden ensam blir ofta bara "L1". */
+export function reasoningTail(s: string): string {
+  return s.slice(-LIVE_TAIL_MAX).replace(/\s*\n+\s*/g, ' · ').replace(/\s+/g, ' ').trim();
 }
 
 /** Radvis läsning av en SSE-body. */
@@ -462,7 +465,7 @@ export async function parseSseStream(lines: AsyncIterable<string>, onProgress?: 
     const c = textOf(ch.delta?.content);
     if (r) reasoning += r;
     if (c) content += c;
-    if ((r || c) && onProgress) onProgress({ reasoningChars: reasoning.length, contentChars: content.length, reasoningTail: lastLine(reasoning), content });
+    if ((r || c) && onProgress) onProgress({ reasoningChars: reasoning.length, contentChars: content.length, reasoningTail: reasoningTail(reasoning), content });
   }
   return { text: content, usage, finishReason, reasoningChars: reasoning.length };
 }
@@ -610,7 +613,7 @@ export async function runRealAgent(id: string, env: AgentEnv): Promise<void> {
     const image = await readModelImage(id);
     if (!model || !image) throw new Error('modellen eller bilden saknas');
     await runBuildAgent(
-      { id, userPrompt: model.meta.userPrompt, image, examples: await readExamples(env.build123dDir) },
+      { id, userPrompt: model.meta.userPrompt, image, skeleton: await readModelSkeleton(id), examples: await readExamples(env.build123dDir) },
       { callModel: tensorxCaller(env), runBuild: localBuildRunner(env), writeStatus: writeAgentStatus, saveReply: replySaver(env), model: env.model },
     );
   } catch (err) {

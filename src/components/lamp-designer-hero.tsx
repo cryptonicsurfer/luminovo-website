@@ -7,8 +7,8 @@ import OrderForm from './order-form';
 interface ModelInfo {
   id: string;
   meta: { userPrompt: string; fullPrompt: string; imageFile: string; createdAt: string };
-  files: { image: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
-  urls: { image: string; glb: string; usdz: string; preview: string; source: string };
+  files: { image: boolean; skeleton: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
+  urls: { image: string; skeleton: string; glb: string; usdz: string; preview: string; source: string };
   spec: string | null;
   agent: AgentStatus | null;
 }
@@ -337,10 +337,18 @@ export default function LampDesignerHero() {
                   <div className="relative aspect-square bg-gray-50">
                     <img src={current.urls.image} alt="Din lampdesign" className="w-full h-full object-cover" />
                   </div>
-                  <div className="p-6">
-                    <h3 className="text-2xl font-bold text-brand-black mb-2">Din Unika Design</h3>
-                    <p className="text-sm text-gray-700">”{current.meta.userPrompt}”</p>
-                    <p className="text-xs text-gray-400 mt-3 font-mono">{current.id}</p>
+                  <div className="p-6 flex gap-5 items-start">
+                    <div className="flex-1">
+                      <h3 className="text-2xl font-bold text-brand-black mb-2">Din Unika Design</h3>
+                      <p className="text-sm text-gray-700">”{current.meta.userPrompt}”</p>
+                      <p className="text-xs text-gray-400 mt-3 font-mono">{current.id}</p>
+                    </div>
+                    {current.files.skeleton && (
+                      <figure className="w-28 shrink-0">
+                        <img src={current.urls.skeleton} alt="Den printbara delen, isolerad" className="w-28 h-28 object-cover rounded-lg border border-gray-100 bg-white" />
+                        <figcaption className="text-[11px] text-gray-500 mt-1 text-center">Den printade delen</figcaption>
+                      </figure>
+                    )}
                   </div>
                 </div>
 

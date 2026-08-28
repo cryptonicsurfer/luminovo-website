@@ -9,6 +9,19 @@ import path from 'node:path';
 
 export const FAL_MODEL = 'fal-ai/bytedance/seedream/v5/lite/text-to-image';
 export const FAL_ENDPOINT = `https://fal.run/${FAL_MODEL}`;
+export const FAL_EDIT_MODEL = 'fal-ai/bytedance/seedream/v5/lite/edit';
+export const FAL_EDIT_ENDPOINT = `https://fal.run/${FAL_EDIT_MODEL}`;
+
+/**
+ * Isoleringssteget (ur originalappen): bild + prompt → bara den printbara
+ * delen. Ingen glödlampa, ingen möbel, ingen innerskärm — det som lurat
+ * byggagenten. Sparas som skelett.jpg och ges till agenten som bild 2.
+ */
+export const ISOLATE_PROMPT =
+  'Show ONLY the 3D-printed white lampshade framework from this photo, as a clean technical product shot: ' +
+  'the exact same structure, struts, rings and base ring, same proportions, but with NO light bulb, NO socket, ' +
+  'NO cable, NO inner diffuser, NO furniture and NO background — matte white PLA on a pure white background, ' +
+  'even shadowless lighting, straight-on front view at eye level, the whole object visible and centered.';
 
 export const MODELS_DIR = path.join(process.cwd(), 'public', 'models');
 
@@ -18,6 +31,7 @@ export const ID_RE = /^[a-z0-9-]{3,64}$/;
 /** De enda filnamn vi någonsin läser eller exponerar ur en modellmapp. */
 export const MODEL_FILES = {
   meta: 'meta.json',
+  skeleton: 'skelett.jpg',
   glb: 'modell.glb',
   usdz: 'modell.usdz',
   preview: 'preview.png',
@@ -139,8 +153,8 @@ export interface ModelMeta {
 export interface ModelInfo {
   id: string;
   meta: ModelMeta;
-  files: { image: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
-  urls: { image: string; glb: string; usdz: string; preview: string; source: string };
+  files: { image: boolean; skeleton: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
+  urls: { image: string; skeleton: string; glb: string; usdz: string; preview: string; source: string };
   spec: string | null;
   agent: AgentStatus | null;
 }
@@ -261,6 +275,7 @@ export async function readModel(id: string, baseDir: string = MODELS_DIR): Promi
   const has = async (name: string) => exists(path.join(dir, name));
   const files = {
     image: await has(meta.imageFile),
+    skeleton: await has(MODEL_FILES.skeleton),
     glb: await has(MODEL_FILES.glb),
     usdz: await has(MODEL_FILES.usdz),
     preview: await has(MODEL_FILES.preview),
@@ -282,6 +297,7 @@ export async function readModel(id: string, baseDir: string = MODELS_DIR): Promi
     files,
     urls: {
       image: `${base}/${meta.imageFile}`,
+      skeleton: `${base}/${MODEL_FILES.skeleton}`,
       glb: `${base}/${MODEL_FILES.glb}`,
       usdz: `${base}/${MODEL_FILES.usdz}`,
       preview: `${base}/${MODEL_FILES.preview}`,
@@ -325,6 +341,23 @@ export async function readModelImage(
   const bytes = await fs.readFile(path.join(dir, m.meta.imageFile));
   const ext = m.meta.imageFile.split('.').pop() ?? 'jpg';
   return { base64: bytes.toString('base64'), mimeType: MIME_FOR_EXT[ext] ?? 'image/jpeg' };
+}
+
+/** Läser skelett.jpg (isolerad printbar del) om den finns. */
+export async function readModelSkeleton(id: string, baseDir: string = MODELS_DIR): Promise<{ base64: string; mimeType: string } | null> {
+  const dir = modelDir(id, baseDir);
+  if (!dir) return null;
+  try {
+    return { base64: (await fs.readFile(path.join(dir, MODEL_FILES.skeleton))).toString('base64'), mimeType: 'image/jpeg' };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSkeleton(id: string, bytes: Uint8Array, baseDir: string = MODELS_DIR): Promise<void> {
+  const dir = modelDir(id, baseDir);
+  if (!dir) throw new Error('ogiltigt id');
+  await fs.writeFile(path.join(dir, MODEL_FILES.skeleton), bytes);
 }
 
 /** Plockar id ur en sajt-relativ bild-URL som /models/<id>/bild.jpg, annars null. */

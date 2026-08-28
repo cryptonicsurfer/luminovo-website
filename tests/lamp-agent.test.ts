@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAgentReply, withForcedName, runBuildAgent, summarizeBuildOutput, buildSystemPrompt, MAX_ROUNDS,
-  checkCodeSafety, childEnv, buildSucceeded, solidityProblem, withOneRetry, maxOutputTokens, parseSseStream,
+  checkCodeSafety, childEnv, buildSucceeded, solidityProblem, withOneRetry, maxOutputTokens, parseSseStream, reasoningTail, buildFirstMessage,
   type AgentDeps, type AgentInput, type ChatMessage, type BuildResult,
 } from '../src/lib/lamp-agent.ts';
 import { parseAgentStatus, markStale, STALE_RUN_MS } from '../src/lib/lamp-pipeline.ts';
@@ -322,7 +322,7 @@ test('parseSseStream: reasoning räknas men returneras inte, content byggs, usag
   assert.equal(reply.finishReason, 'stop');
   assert.deepEqual(reply.usage, { input: 100, output: 50 });
   assert.equal(seen.length, 4);
-  assert.equal(seen[1].tail, 'Räknar stavar');
+  assert.equal(seen[1].tail, 'Bilden visar en bur. · Räknar stavar');
   assert.equal(seen[3].c, reply.text.length);
 });
 
@@ -347,4 +347,19 @@ test('loopen: live-fältet skrivs medan modellen svarar och tas bort efteråt', 
   assert.ok(snapshots.includes('### spec.md\n'), 'svaret syns medan det skrivs');
   assert.equal(snapshots[snapshots.length - 1], undefined, 'sista skrivningen utan live');
   assert.ok(s.log.some((e) => /Tänkte 0k tecken/.test(e.msg)));
+});
+
+test('reasoningTail: sista ~240 tecken som en rad', () => {
+  assert.equal(reasoningTail('a\n\n  b  \nc'), 'a · b · c');
+  assert.ok(reasoningTail('x'.repeat(1000)).length <= 240);
+});
+
+test('buildFirstMessage: skelettet blir bild 2 när det finns', () => {
+  const base = { id: 'lampa-1', userPrompt: 'p', image: { base64: 'AA', mimeType: 'image/jpeg' }, examples: [] };
+  const one = buildFirstMessage(base).content as { type: string; text?: string }[];
+  assert.equal(one.filter((p) => p.type === 'image_url').length, 1);
+  assert.match(one[0].text ?? '', /Referensbild/);
+  const two = buildFirstMessage({ ...base, skeleton: { base64: 'BB', mimeType: 'image/jpeg' } }).content as { type: string; text?: string }[];
+  assert.equal(two.filter((p) => p.type === 'image_url').length, 2);
+  assert.match(two[0].text ?? '', /Bild 2: BARA den printade delen/);
 });

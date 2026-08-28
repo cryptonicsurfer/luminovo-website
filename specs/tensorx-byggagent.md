@@ -74,6 +74,16 @@ får ta över — inget annat ändras.
   misslyckande. Pollen jämför även `agent.json`.
 - `.env.example` uppdaterad; README-avsnitt; tester.
 
+### Isoleringssteget (tillbaka från originalappen, 2026-08-28)
+
+`POST /api/generate-lampshade` gör efter bilden ett andra fal-anrop (Seedream
+edit, `ISOLATE_PROMPT`): samma struktur men bara den printbara delen — ingen
+glödlampa, innerskärm, möbel eller bakgrund — sparad som `skelett.jpg`. Best
+effort: misslyckas det finns originalbilden ändå. Agenten får båda bilderna
+("utgå från bild 2 för formen, bild 1 för sammanhanget"); sidan visar
+skelettet som en liten bild under designen. Skäl: innerskärmen och pidestalen
+i produktfotot har lurat agenten till massiva kroppar.
+
 ## Utanför scope
 
 - Auth / rate limit — lokal demo (som förut). En körning per modell åt gången
