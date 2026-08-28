@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAgentReply, withForcedName, runBuildAgent, summarizeBuildOutput, buildSystemPrompt, MAX_ROUNDS,
-  checkCodeSafety, childEnv, buildSucceeded, solidityProblem,
+  checkCodeSafety, childEnv, buildSucceeded, solidityProblem, withOneRetry,
   type AgentDeps, type AgentInput, type ChatMessage, type BuildResult,
 } from '../src/lib/lamp-agent.ts';
 import { parseAgentStatus, markStale, STALE_RUN_MS } from '../src/lib/lamp-pipeline.ts';
@@ -265,4 +265,19 @@ test('loopen: massivt bygge räknas som fel och skickas tillbaka', async () => {
   const txt = (fb.content as { type: string; text?: string }[]).find((p) => p.type === 'text')?.text ?? '';
   assert.match(txt, /massiv/);
   assert.ok(s.log.some((e) => /massiv/.test(e.msg)));
+});
+
+test('withOneRetry: en gång till vid timeout/5xx, inte vid annat', async () => {
+  let n = 0;
+  const flaky = async () => { n++; if (n === 1) throw new Error('The operation was aborted due to timeout'); return 'ok'; };
+  assert.equal(await withOneRetry(flaky), 'ok');
+  assert.equal(n, 2);
+  n = 0;
+  const server = async () => { n++; throw new Error('TensorX svarade 502'); };
+  await assert.rejects(() => withOneRetry(server), /502/);
+  assert.equal(n, 2, 'två försök, sen ge upp');
+  n = 0;
+  const auth = async () => { n++; throw new Error('TensorX svarade 401'); };
+  await assert.rejects(() => withOneRetry(auth), /401/);
+  assert.equal(n, 1, 'inget omförsök på 401');
 });

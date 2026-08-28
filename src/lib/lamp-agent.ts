@@ -112,6 +112,9 @@ KONVENTIONER (samma som build123d-tests/CLAUDE.md):
 - Printkonstanter: bädd 250 × 210 × 220 mm (Z ≤ 220!), minsta vägg 0.8 mm, inga stöd.
   Lampskärm: max 40 cm hög (i praktiken ≤ 210 pga bädden), E27-hål 40.5 mm centrerat i bottenplattan.
 - Bara den printade delen: ingen glödlampa, ingen frostad innerskärm, ingen möbel.
+- EN SAMMANHÄNGANDE KROPP: varje ring/stav/gitterelement måste överlappa något annat
+  som i sin tur når bottenplattan. Svävande ringar = "N LOSA KROPPAR" = fel. Låt stavar
+  gå genom ringarna (överlappa 1–2 mm), inte bara nudda dem.
 - SKÄRMEN ÄR ETT ÖPPET RAMVERK: stavar, spjälor, ringar, gitter — med stora öppningar som
   ljuset går rakt igenom och med tomt utrymme i mitten för glödlampan (Ø ≥ 70 mm fritt
   kring axeln ovanför bottenplattan). Stavar 2–4 mm. Aldrig en massiv kropp, aldrig ett
@@ -330,8 +333,27 @@ export function readAgentEnv(env: NodeJS.ProcessEnv = process.env): AgentEnv | n
   };
 }
 
+/** Ett omförsök vid timeout eller 5xx — TensorX hänger ibland ett enstaka anrop. */
+export async function withOneRetry<T>(fn: () => Promise<T>, onRetry?: (err: unknown) => void): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const retryable = /timeout|aborted|TensorX svarade 5\d\d|fetch failed|ECONNRESET/i.test(msg);
+    if (!retryable) throw err;
+    onRetry?.(err);
+    return await fn();
+  }
+}
+
 export function tensorxCaller(env: AgentEnv): AgentDeps['callModel'] {
-  return async (messages) => {
+  return (messages) => withOneRetry(() => tensorxOnce(env, messages), (err) => {
+    console.warn(`[agent] TensorX: ${err instanceof Error ? err.message : err} — försöker en gång till`);
+  });
+}
+
+async function tensorxOnce(env: AgentEnv, messages: ChatMessage[]): Promise<ModelReply> {
+  {
     const res = await fetch(`${env.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.apiKey}`, 'Content-Type': 'application/json' },
@@ -354,7 +376,7 @@ export function tensorxCaller(env: AgentEnv): AgentDeps['callModel'] {
     const finishReason = typeof json?.choices?.[0]?.finish_reason === 'string' ? json.choices[0].finish_reason : undefined;
     console.log(`[agent] ${env.model}: ${text.length} tecken, finish=${finishReason}, tokens in/ut ${usage?.input}/${usage?.output}`);
     return { text, usage, finishReason };
-  };
+  }
 }
 
 /** Barnprocessen får INTE ärva serverns miljö (API-nycklar). Bara det uv/python/blender behöver. */
