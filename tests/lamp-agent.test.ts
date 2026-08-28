@@ -180,6 +180,8 @@ function statusHas(list: string[], s: string) { return list.includes(s); }
 
 test('checkCodeSafety: tillåter build123d + math, avvisar allt annat', () => {
   assert.deepEqual(checkCodeSafety('from build123d import *\nimport math\nfrom math import atan, degrees\npart = Cylinder(1, 1)\nprint("ok")\n'), []);
+  assert.deepEqual(checkCodeSafety('from build123d import *\nfrom lamplib import *\nfrom lamplib import bur, ring\nimport lamplib\npart = bur([(10, 80), (200, 80)], 24)\n'), []);
+  assert.equal(checkCodeSafety('from lamplibx import *').length, 1);
   const bad = checkCodeSafety([
     'import os',
     'from build123d import *',
@@ -381,4 +383,16 @@ test('writeAgentStatus: 60 samtidiga skrivningar utan ENOENT, sista vinner, inga
   } finally {
     await rm(base, { recursive: true, force: true });
   }
+});
+
+test('systemprompten blir en skill när LAMPLIB.md finns', () => {
+  const doc = '# lamplib — cheat sheet\n`bur(profil=...)`';
+  const p = buildSystemPrompt([{ name: 'lampa_bur_exempel.py', code: 'part = bur(...)' }], doc);
+  assert.match(p, /ANVÄND DET/);
+  assert.match(p, /bur\(profil=/);
+  assert.match(p, /### del\.py/, 'svarsformatet finns kvar');
+  assert.match(p, /E27/, 'printreglerna finns kvar');
+  assert.doesNotMatch(p, /BUILD123D-LATHUND/, 'den generella lathunden ersätts');
+  const utan = buildSystemPrompt([]);
+  assert.match(utan, /BUILD123D-LATHUND/);
 });

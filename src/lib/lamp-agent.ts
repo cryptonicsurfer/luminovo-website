@@ -68,6 +68,8 @@ export interface AgentDeps {
 
 export interface AgentInput {
   id: string;
+  /** Innehållet i build123d-tests/ref/LAMPLIB.md — skillen. */
+  lamplibDoc?: string;
   userPrompt: string;
   image: { base64: string; mimeType: string };
   /** Isolerad printbar del (skelett.jpg) om isoleringssteget lyckades. */
@@ -100,7 +102,7 @@ export function parseAgentReply(text: string): { spec?: string; code?: string } 
  * (POST /api/generate-lampshade → meta.json → prompten), så koden får bara
  * använda build123d och math — allt annat avvisas innan den körs.
  */
-const ALLOWED_IMPORT = /^\s*(from\s+build123d\s+import\s+[\w*,\s]+|import\s+math|from\s+math\s+import\s+[\w,\s]+)\s*(#.*)?$/;
+const ALLOWED_IMPORT = /^\s*(from\s+(build123d|lamplib)\s+import\s+[\w*,\s]+|import\s+(math|lamplib)|from\s+math\s+import\s+[\w,\s]+)\s*(#.*)?$/;
 const FORBIDDEN_CALLS = /\b(__import__|exec|eval|compile|open|getattr|setattr|globals|locals|vars|breakpoint|input|__builtins__)\s*\(/;
 const FORBIDDEN_MODULES = /\b(os|sys|subprocess|socket|urllib|requests|shutil|pathlib|importlib|ctypes|http|ftplib|smtplib|pickle|marshal|builtins|signal|threading|multiprocessing)\s*\./;
 
@@ -108,7 +110,7 @@ export function checkCodeSafety(code: string): string[] {
   const problems: string[] = [];
   code.split('\n').forEach((line, i) => {
     const n = i + 1;
-    if (/^\s*(import|from)\s/.test(line) && !ALLOWED_IMPORT.test(line)) problems.push(`rad ${n}: otillåten import — bara \`from build123d import *\` och \`import math\` är tillåtna`);
+    if (/^\s*(import|from)\s/.test(line) && !ALLOWED_IMPORT.test(line)) problems.push(`rad ${n}: otillåten import — bara \`from build123d import *\`, \`from lamplib import *\` och \`import math\` är tillåtna`);
     const c = FORBIDDEN_CALLS.exec(line);
     if (c) problems.push(`rad ${n}: \`${c[1]}(\` är inte tillåtet`);
     const m = FORBIDDEN_MODULES.exec(line);
@@ -184,17 +186,30 @@ part = b.part
 \`\`\`
 `;
 
-export function buildSystemPrompt(examples: { name: string; code: string }[]): string {
+/**
+ * Med `lamplibDoc` (ref/LAMPLIB.md) blir prompten en *skill*: modellen komponerar
+ * testade byggstenar i stället för att härleda geometri. Utan doc: den generella
+ * build123d-lathunden (reserv).
+ */
+export function buildSystemPrompt(examples: { name: string; code: string }[], lamplibDoc?: string): string {
   const ex = examples.map((e) => `--- ${e.name} ---\n${e.code.trim()}`).join('\n\n');
+  const skill = lamplibDoc
+    ? '\nDU HAR ETT BIBLIOTEK — ANVÄND DET. Räkna ALDRIG geometri själv (inga vektorer, vinklar, ' +
+      'överlapp, kryssprodukter): lamplib gör det, och rätt. Din tankekedja ska handla om VAD bilden ' +
+      'visar (familj, antal, proportioner), inte om HUR det byggs. Sikta på 10–25 rader kod.\n\n' +
+      lamplibDoc + '\n' +
+      CHEAT_SHEET.slice(0, CHEAT_SHEET.indexOf('BUILD123D-LATHUND')) +   // konventioner + printregler
+      CHEAT_SHEET.slice(CHEAT_SHEET.indexOf('SVARSFORMAT'))               // svarsformatet
+    : CHEAT_SHEET;
   return (
-    'Du är en CAD-ingenjör som skriver parametriska, 3D-printbara delar i build123d (Python). ' +
+    'Du är en CAD-ingenjör som skriver parametriska, 3D-printbara lampskärmar i build123d (Python). ' +
     'Du får en bild av en bordslampskärm och ska (1) läsa av dess form och uppskatta måtten, ' +
-    '(2) skriva en kravspec med numrerade rader, (3) skriva en build123d-fil där varje konstant pekar på en spec-rad. ' +
+    '(2) skriva en kravspec med numrerade rader, (3) skriva en Python-fil där varje konstant pekar på en spec-rad. ' +
     'Servern bygger, validerar och renderar delen och skickar tillbaka utskriften och en rendering. ' +
     'Får du ett fel eller en rendering som inte stämmer med bilden: rätta och svara igen i samma format. ' +
     'Var konkret och kort. Ingen prosa utanför blocken.\n' +
-    CHEAT_SHEET +
-    (ex ? `\nEXEMPEL PÅ FÄRDIGA DELAR I SAMMA STIL:\n\n${ex}\n` : '')
+    skill +
+    (ex ? `\nEXEMPEL:\n\n${ex}\n` : '')
   );
 }
 
@@ -286,7 +301,7 @@ export async function runBuildAgent(input: AgentInput, deps: AgentDeps): Promise
 
   await log(`Läser bilden med ${deps.model}`, 'läser bilden');
   const messages: ChatMessage[] = [
-    { role: 'system', content: buildSystemPrompt(input.examples) },
+    { role: 'system', content: buildSystemPrompt(input.examples, input.lamplibDoc) },
     buildFirstMessage(input),
   ];
   let spec: string | undefined;
@@ -596,12 +611,17 @@ export async function writeAgentStatus(id: string, status: AgentStatus, baseDir?
   }
 }
 
-async function readExamples(build123dDir: string): Promise<{ name: string; code: string }[]> {
+async function readExamples(build123dDir: string, withLamplib: boolean): Promise<{ name: string; code: string }[]> {
   const out: { name: string; code: string }[] = [];
-  for (const name of ['demo_konsol.py', 'lampa_konisk.py']) {
+  // Med lamplib: bara det korta lamplib-exemplet (annars härmar modellen den råa build123d-koden).
+  for (const name of withLamplib ? ['lampa_bur_exempel.py'] : ['demo_konsol.py', 'lampa_konisk.py']) {
     try { out.push({ name, code: await fs.readFile(path.join(build123dDir, 'parts', name), 'utf8') }); } catch { /* valfritt */ }
   }
   return out;
+}
+
+async function readLamplibDoc(build123dDir: string): Promise<string | undefined> {
+  try { return await fs.readFile(path.join(build123dDir, 'ref', 'LAMPLIB.md'), 'utf8'); } catch { return undefined; }
 }
 
 /**
@@ -640,8 +660,9 @@ export async function runRealAgent(id: string, env: AgentEnv): Promise<void> {
     const model = await readModel(id);
     const image = await readModelImage(id);
     if (!model || !image) throw new Error('modellen eller bilden saknas');
+    const lamplibDoc = await readLamplibDoc(env.build123dDir);
     await runBuildAgent(
-      { id, userPrompt: model.meta.userPrompt, image, skeleton: await readModelSkeleton(id), examples: await readExamples(env.build123dDir) },
+      { id, lamplibDoc, userPrompt: model.meta.userPrompt, image, skeleton: await readModelSkeleton(id), examples: await readExamples(env.build123dDir, !!lamplibDoc) },
       { callModel: tensorxCaller(env), runBuild: localBuildRunner(env), writeStatus: writeAgentStatus, saveReply: replySaver(env), model: env.model },
     );
   } catch (err) {
