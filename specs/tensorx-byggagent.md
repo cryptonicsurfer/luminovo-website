@@ -36,7 +36,7 @@ får ta över — inget annat ändras.
      finishedAt, usage}` — skrivs efter varje steg. Läggs i `MODEL_FILES` och
      exponeras i `readModel()` som `agent`.
 - TensorX via `fetch` mot `${TENSORX_BASE_URL}/chat/completions` (OpenAI-format,
-  `stream: false`, bild som `image_url`-data-URI, `max_tokens` 16000, timeout 240 s).
+  `stream: false`, bild som `image_url`-data-URI, `max_tokens` 32000 — reasoning-tokens räknas som output, 16k kapade första svaret i test 1 — timeout 300 s).
   `reasoning_content` i svaret ignoreras. Ingen `enable_thinking: false`
   (knowledge-worker: det flyttar tankekedjan in i `content`).
 - Env: `TENSORX_API_KEY`, `TENSORX_BASE_URL` (default `https://api.tensorx.ai/v1`),
@@ -87,7 +87,7 @@ för dem, det får Paul avgöra).
   är på sin höjd en konstig lampa eller ett byggfel. Ingen data den kan läcka.
 - `agent.json` valideras vid inläsning (form + längdtak på loggen) så en
   trasig fil inte fäller `/api/models`.
-- Kostnad: max 3 varv × 16k output-tokens, en körning per modell åt gången.
+- Kostnad: max 3 varv × 32k output-tokens, en körning per modell åt gången.
 
 ## Testplan
 
