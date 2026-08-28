@@ -9,6 +9,19 @@ import path from 'node:path';
 
 export const FAL_MODEL = 'fal-ai/bytedance/seedream/v5/lite/text-to-image';
 export const FAL_ENDPOINT = `https://fal.run/${FAL_MODEL}`;
+export const FAL_EDIT_MODEL = 'fal-ai/bytedance/seedream/v5/lite/edit';
+export const FAL_EDIT_ENDPOINT = `https://fal.run/${FAL_EDIT_MODEL}`;
+
+/**
+ * Isoleringssteget (ur originalappen): bild + prompt → bara den printbara
+ * delen. Ingen glödlampa, ingen möbel, ingen innerskärm — det som lurat
+ * byggagenten. Sparas som skelett.jpg och ges till agenten som bild 2.
+ */
+export const ISOLATE_PROMPT =
+  'Show ONLY the 3D-printed white lampshade framework from this photo, as a clean technical product shot: ' +
+  'the exact same structure, struts, rings and base ring, same proportions, but with NO light bulb, NO socket, ' +
+  'NO cable, NO inner diffuser, NO furniture and NO background — matte white PLA on a pure white background, ' +
+  'even shadowless lighting, straight-on front view at eye level, the whole object visible and centered.';
 
 export const MODELS_DIR = path.join(process.cwd(), 'public', 'models');
 
@@ -18,12 +31,105 @@ export const ID_RE = /^[a-z0-9-]{3,64}$/;
 /** De enda filnamn vi någonsin läser eller exponerar ur en modellmapp. */
 export const MODEL_FILES = {
   meta: 'meta.json',
+  skeleton: 'skelett.jpg',
   glb: 'modell.glb',
   usdz: 'modell.usdz',
   preview: 'preview.png',
   spec: 'spec.md',
   source: 'del.py',
+  agent: 'agent.json',
 } as const;
+
+/** Byggagentens status (skrivs av src/lib/lamp-agent.ts). */
+export interface AgentLogEntry { t: string; msg: string }
+export interface AgentStatus {
+  state: 'running' | 'done' | 'failed';
+  step: string;
+  round: number;
+  model: string;
+  log: AgentLogEntry[];
+  startedAt: string;
+  finishedAt?: string;
+  usage?: { input: number; output: number };
+  /** Hjärtslag: skrivs var 30:e s medan modellen tänker, så en lång körning inte döms ut som död. */
+  updatedAt?: string;
+  /** Sekunder modellen tänkt i pågående anrop (för UI:t). */
+  thinkingSeconds?: number;
+  /** Strömmat under pågående modellanrop; tas bort när svaret är klart. */
+  live?: AgentLive;
+}
+export interface AgentLive {
+  reasoningChars: number;
+  contentChars: number;
+  /** Sista raden i resonemanget — visas dämpat, sparas aldrig efter varvet. */
+  reasoningTail: string;
+  /** Svarstexten så långt (spec.md + del.py medan de skrivs), max LIVE_CONTENT_MAX tecken. */
+  content: string;
+}
+export const LIVE_CONTENT_MAX = 8000;
+export const LIVE_TAIL_MAX = 240;
+const AGENT_STATES = new Set(['running', 'done', 'failed']);
+const MAX_LOG_ENTRIES = 200;
+/** En körning som inte hörts av på så länge räknas som död (låset tas över, UI:t visar "avbruten"). */
+export const STALE_RUN_MS = 10 * 60_000;
+
+/** Senaste livstecken: hjärtslaget, annars sista loggraden, annars starttiden. */
+export function lastActivityMs(a: AgentStatus): number {
+  const candidates = [a.updatedAt, a.log.length ? a.log[a.log.length - 1].t : undefined, a.startedAt]
+    .map((s) => (s ? Date.parse(s) : NaN))
+    .filter((t) => Number.isFinite(t));
+  return candidates.length ? Math.max(...candidates) : 0;
+}
+
+/** running utan livstecken på STALE_RUN_MS → failed, så sidan får en "försök igen"-knapp i stället för evig spinner. */
+export function markStale(a: AgentStatus, nowMs: number = Date.now()): AgentStatus {
+  if (a.state !== 'running' || nowMs - lastActivityMs(a) < STALE_RUN_MS) return a;
+  return {
+    ...a,
+    state: 'failed',
+    step: 'avbruten',
+    log: [...a.log, { t: new Date(nowMs).toISOString(), msg: 'Körningen dog utan att avslutas (startade servern om?) — försök igen' }],
+  };
+}
+
+/** Fail-closed: en trasig agent.json ger null, aldrig ett kastat fel. */
+export function parseAgentStatus(raw: unknown): AgentStatus | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const a = raw as Record<string, unknown>;
+  if (typeof a.state !== 'string' || !AGENT_STATES.has(a.state)) return null;
+  if (typeof a.startedAt !== 'string') return null;
+  const log = Array.isArray(a.log)
+    ? a.log.filter((e): e is AgentLogEntry => !!e && typeof e === 'object' && typeof (e as AgentLogEntry).msg === 'string' && typeof (e as AgentLogEntry).t === 'string')
+      .slice(-MAX_LOG_ENTRIES)
+    : [];
+  const usage = a.usage && typeof a.usage === 'object' && typeof (a.usage as { input?: unknown }).input === 'number' && typeof (a.usage as { output?: unknown }).output === 'number'
+    ? (a.usage as { input: number; output: number })
+    : undefined;
+  return {
+    state: a.state as AgentStatus['state'],
+    step: typeof a.step === 'string' ? a.step : '',
+    round: typeof a.round === 'number' ? a.round : 0,
+    model: typeof a.model === 'string' ? a.model : '',
+    log,
+    startedAt: a.startedAt,
+    finishedAt: typeof a.finishedAt === 'string' ? a.finishedAt : undefined,
+    usage,
+    updatedAt: typeof a.updatedAt === 'string' ? a.updatedAt : undefined,
+    thinkingSeconds: typeof a.thinkingSeconds === 'number' ? a.thinkingSeconds : undefined,
+    live: parseLive(a.live),
+  };
+}
+
+function parseLive(raw: unknown): AgentLive | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const l = raw as Record<string, unknown>;
+  return {
+    reasoningChars: typeof l.reasoningChars === 'number' ? l.reasoningChars : 0,
+    contentChars: typeof l.contentChars === 'number' ? l.contentChars : 0,
+    reasoningTail: typeof l.reasoningTail === 'string' ? l.reasoningTail.slice(-LIVE_TAIL_MAX) : '',
+    content: typeof l.content === 'string' ? l.content.slice(-LIVE_CONTENT_MAX) : '',
+  };
+}
 
 const IMAGE_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -47,9 +153,10 @@ export interface ModelMeta {
 export interface ModelInfo {
   id: string;
   meta: ModelMeta;
-  files: { image: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
-  urls: { image: string; glb: string; usdz: string; preview: string; source: string };
+  files: { image: boolean; skeleton: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
+  urls: { image: string; skeleton: string; glb: string; usdz: string; preview: string; source: string };
   spec: string | null;
+  agent: AgentStatus | null;
 }
 
 export function isValidId(id: unknown): id is string {
@@ -80,18 +187,30 @@ const ENVIRONMENTS = [
 ];
 
 /**
- * Fast mall i stället för LLM-optimerad prompt. Kraven är samma som i
- * Luminovos ursprungliga mall (40 cm, E27, vit PLA) — det är dessa som
- * sedan blir mått i spec.md.
+ * Promptförstärkning — fast mall, ingen LLM. Luminovos lampor är *stommen*:
+ * öppna ramverk av stavar, gitter och ribbor som ljuset går rakt igenom
+ * (se kollektionen). Aldrig något som egentligen vill vara tyg, papper
+ * eller ett tätt skal — det blir varken printbart eller en Luminovo-lampa,
+ * och byggagenten ritar det som en massiv klump. Kundens text är
+ * *designbriefen*; ramverkskravet är fast.
  */
+export const LAMP_STRUCTURE_RULES =
+  'The shade is an OPEN SELF-SUPPORTING FRAMEWORK: a lattice, cage or skeleton of thin printed struts, ribs or slats ' +
+  'with large open gaps between them, so the bulb is clearly visible through the structure and the light throws ' +
+  'patterned shadows on the wall. The structure itself is the design — there is NO fabric, NO paper, NO frosted or ' +
+  'translucent panels, NO solid walls, NO pleated or folded surfaces, nothing that covers the gaps. ' +
+  'The geometry is REGULAR and ROTATIONALLY SYMMETRIC around a vertical axis: straight or evenly angled struts, ' +
+  'horizontal rings, vertical slats, or a diamond/triangle lattice wrapped on a cylinder, cone, double-cone or barrel — ' +
+  'like a precise CAD model. No organic free-form curves, no woven or wobbly lines, no random mesh. ' +
+  'A single continuous 3D-printed part in matte white PLA, printable without supports: struts 2–4 mm thick, ' +
+  'a solid base ring with a central hole for an E27 socket, maximum 40 cm tall and 30 cm wide.';
+
 export function buildPrompt(userPrompt: string, pick: number = Math.floor(Math.random() * ENVIRONMENTS.length)): string {
   const env = ENVIRONMENTS[((pick % ENVIRONMENTS.length) + ENVIRONMENTS.length) % ENVIRONMENTS.length];
   return (
-    `Product photograph of a 3D-printed table lampshade in matte white PLA. ` +
-    `Design brief: ${userPrompt}. ` +
-    `Clean geometric structure that can be 3D printed without supports, ` +
-    `maximum 40 cm tall and 30 cm wide, solid base ring with a central hole for an E27 socket. ` +
-    `Warm 2700K light glowing from inside, standing on ${env}, Scandinavian minimalist interior, ` +
+    `Product photograph of a 3D-printed table lamp. Design brief from the customer: "${userPrompt}". ` +
+    LAMP_STRUCTURE_RULES + ' ' +
+    `Warm 2700K bulb glowing inside the framework, standing on ${env}, Scandinavian minimalist interior, ` +
     `soft natural daylight, no people, no other objects.`
   );
 }
@@ -156,6 +275,7 @@ export async function readModel(id: string, baseDir: string = MODELS_DIR): Promi
   const has = async (name: string) => exists(path.join(dir, name));
   const files = {
     image: await has(meta.imageFile),
+    skeleton: await has(MODEL_FILES.skeleton),
     glb: await has(MODEL_FILES.glb),
     usdz: await has(MODEL_FILES.usdz),
     preview: await has(MODEL_FILES.preview),
@@ -163,6 +283,13 @@ export async function readModel(id: string, baseDir: string = MODELS_DIR): Promi
     source: await has(MODEL_FILES.source),
   };
   const spec = files.spec ? await fs.readFile(path.join(dir, MODEL_FILES.spec), 'utf8') : null;
+  let agent: AgentStatus | null = null;
+  try {
+    agent = parseAgentStatus(JSON.parse(await fs.readFile(path.join(dir, MODEL_FILES.agent), 'utf8')));
+    if (agent) agent = markStale(agent);
+  } catch {
+    agent = null;
+  }
   const base = `/models/${id}`;
   return {
     id,
@@ -170,12 +297,14 @@ export async function readModel(id: string, baseDir: string = MODELS_DIR): Promi
     files,
     urls: {
       image: `${base}/${meta.imageFile}`,
+      skeleton: `${base}/${MODEL_FILES.skeleton}`,
       glb: `${base}/${MODEL_FILES.glb}`,
       usdz: `${base}/${MODEL_FILES.usdz}`,
       preview: `${base}/${MODEL_FILES.preview}`,
       source: `${base}/${MODEL_FILES.source}`,
     },
     spec,
+    agent,
   };
 }
 
@@ -212,6 +341,23 @@ export async function readModelImage(
   const bytes = await fs.readFile(path.join(dir, m.meta.imageFile));
   const ext = m.meta.imageFile.split('.').pop() ?? 'jpg';
   return { base64: bytes.toString('base64'), mimeType: MIME_FOR_EXT[ext] ?? 'image/jpeg' };
+}
+
+/** Läser skelett.jpg (isolerad printbar del) om den finns. */
+export async function readModelSkeleton(id: string, baseDir: string = MODELS_DIR): Promise<{ base64: string; mimeType: string } | null> {
+  const dir = modelDir(id, baseDir);
+  if (!dir) return null;
+  try {
+    return { base64: (await fs.readFile(path.join(dir, MODEL_FILES.skeleton))).toString('base64'), mimeType: 'image/jpeg' };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSkeleton(id: string, bytes: Uint8Array, baseDir: string = MODELS_DIR): Promise<void> {
+  const dir = modelDir(id, baseDir);
+  if (!dir) throw new Error('ogiltigt id');
+  await fs.writeFile(path.join(dir, MODEL_FILES.skeleton), bytes);
 }
 
 /** Plockar id ur en sajt-relativ bild-URL som /models/<id>/bild.jpg, annars null. */

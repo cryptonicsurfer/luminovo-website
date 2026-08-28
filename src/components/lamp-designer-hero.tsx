@@ -7,12 +7,58 @@ import OrderForm from './order-form';
 interface ModelInfo {
   id: string;
   meta: { userPrompt: string; fullPrompt: string; imageFile: string; createdAt: string };
-  files: { image: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
-  urls: { image: string; glb: string; usdz: string; preview: string; source: string };
+  files: { image: boolean; skeleton: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
+  urls: { image: string; skeleton: string; glb: string; usdz: string; preview: string; source: string };
   spec: string | null;
+  agent: AgentStatus | null;
+}
+interface AgentStatus {
+  state: 'running' | 'done' | 'failed';
+  step: string;
+  round: number;
+  model: string;
+  log: { t: string; msg: string }[];
+  startedAt: string;
+  finishedAt?: string;
+  usage?: { input: number; output: number };
+  updatedAt?: string;
+  thinkingSeconds?: number;
+  live?: { reasoningChars: number; contentChars: number; reasoningTail: string; content: string };
 }
 
 const POLL_MS = 3000;
+const POLL_LIVE_MS = 1500;
+
+/** Det modellen skriver, medan det skrivs. Autoscrollar till sista raden. */
+function LiveFeed({ live }: { live: NonNullable<AgentStatus['live']> }) {
+  const ref = useRef<HTMLPreElement>(null);
+  useEffect(() => { const el = ref.current; if (el) el.scrollTop = el.scrollHeight; }, [live.contentChars]);
+  const tail = live.content.split('\n').slice(-40).join('\n');
+  return (
+    <div className="mt-3 rounded-lg bg-white/80 border border-brand-sand px-4 py-3">
+      {live.content ? (
+        <>
+          <p className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Skriver spec och kod</p>
+          <pre ref={ref} className="text-[11px] leading-snug font-mono text-gray-800 whitespace-pre-wrap max-h-64 overflow-y-auto">{tail}</pre>
+        </>
+      ) : (
+        <>
+          <p className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Tänker</p>
+          <p className="text-xs italic text-gray-600">{live.reasoningTail || 'läser bilden…'}</p>
+        </>
+      )}
+      <p className="text-[11px] text-gray-400 mt-2">
+        {Math.round(live.reasoningChars / 1000)}k tecken tänkt{live.contentChars ? ` · ${live.contentChars} tecken skrivet` : ''}
+      </p>
+    </div>
+  );
+}
+
+const MODEL_LABELS: Record<string, string> = {
+  'z-ai/glm-5.3-flash': 'GLM 5.3 Flash · EU',
+  'qwen/qwen3.8-flash-next': 'Qwen3.8 Flash · EU',
+};
+const modelLabel = (id: string) => MODEL_LABELS[id] ?? id;
 
 /**
  * Minimal rendering av spec.md: rubriker, tabeller, punktlistor, stycken.
@@ -103,7 +149,8 @@ function ModelViewer({ glb, usdz }: { glb: string; usdz?: string }) {
 }
 
 function sameState(a: ModelInfo, b: ModelInfo) {
-  return a.id === b.id && a.spec === b.spec && JSON.stringify(a.files) === JSON.stringify(b.files);
+  return a.id === b.id && a.spec === b.spec && JSON.stringify(a.files) === JSON.stringify(b.files)
+    && JSON.stringify(a.agent) === JSON.stringify(b.agent);
 }
 
 export default function LampDesignerHero() {
@@ -112,18 +159,20 @@ export default function LampDesignerHero() {
   const [current, setCurrent] = useState<ModelInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isOrderFormOpen, setIsOrderFormOpen] = useState(false);
+  const [isStartingAgent, setIsStartingAgent] = useState(false);
 
-  // Vid sidladdning: visa senaste designen, så att den finns kvar när man går in igen.
+  // Vid sidladdning: visa senaste designen (eller ?id=<modell> — bra på scen), så att den finns kvar när man går in igen.
   useEffect(() => {
-    fetch('/api/models', { cache: 'no-store' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d?.models?.[0]) setCurrent(d.models[0]); })
-      .catch(() => { /* tomt läge är ett giltigt läge */ });
+    const wanted = new URLSearchParams(window.location.search).get('id');
+    const load = wanted && /^[a-z0-9-]{3,64}$/.test(wanted)
+      ? fetch(`/api/models/${wanted}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null))
+      : fetch('/api/models', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((d) => d?.models?.[0] ?? null);
+    load.then((m) => { if (m) setCurrent(m); }).catch(() => { /* tomt läge är ett giltigt läge */ });
   }, []);
 
   // Polla tills 3D-modellen (och specen) ligger i mappen. Terminalen skriver, sidan tittar.
   useEffect(() => {
-    if (!current || current.files.glb) return;
+    if (!current || (current.files.glb && current.agent?.state !== 'running')) return;
     const id = current.id;
     const timer = setInterval(async () => {
       try {
@@ -132,7 +181,7 @@ export default function LampDesignerHero() {
         const m: ModelInfo = await r.json();
         setCurrent((prev) => (prev && prev.id === id && !sameState(prev, m) ? m : prev));
       } catch { /* nästa tick */ }
-    }, POLL_MS);
+    }, current.agent?.state === 'running' ? POLL_LIVE_MS : POLL_MS);
     return () => clearInterval(timer);
   }, [current]);
 
@@ -155,6 +204,23 @@ export default function LampDesignerHero() {
       setError(err instanceof Error ? err.message : 'Något gick fel');
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  const handleBuildWithAgent = async () => {
+    if (!current || isStartingAgent) return;
+    setIsStartingAgent(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/models/${current.id}/build`, { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'Kunde inte starta byggagenten');
+      const m = await fetch(`/api/models/${current.id}`, { cache: 'no-store' });
+      if (m.ok) setCurrent(await m.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Något gick fel');
+    } finally {
+      setIsStartingAgent(false);
     }
   };
 
@@ -271,10 +337,18 @@ export default function LampDesignerHero() {
                   <div className="relative aspect-square bg-gray-50">
                     <img src={current.urls.image} alt="Din lampdesign" className="w-full h-full object-cover" />
                   </div>
-                  <div className="p-6">
-                    <h3 className="text-2xl font-bold text-brand-black mb-2">Din Unika Design</h3>
-                    <p className="text-sm text-gray-700">”{current.meta.userPrompt}”</p>
-                    <p className="text-xs text-gray-400 mt-3 font-mono">{current.id}</p>
+                  <div className="p-6 flex gap-5 items-start">
+                    <div className="flex-1">
+                      <h3 className="text-2xl font-bold text-brand-black mb-2">Din Unika Design</h3>
+                      <p className="text-sm text-gray-700">”{current.meta.userPrompt}”</p>
+                      <p className="text-xs text-gray-400 mt-3 font-mono">{current.id}</p>
+                    </div>
+                    {current.files.skeleton && (
+                      <figure className="w-28 shrink-0">
+                        <img src={current.urls.skeleton} alt="Den printbara delen, isolerad" className="w-28 h-28 object-cover rounded-lg border border-gray-100 bg-white" />
+                        <figcaption className="text-[11px] text-gray-500 mt-1 text-center">Den printade delen</figcaption>
+                      </figure>
+                    )}
                   </div>
                 </div>
 
@@ -294,16 +368,66 @@ export default function LampDesignerHero() {
                     <div className="bg-gradient-to-b from-gray-50 to-gray-100" style={{ height: '500px' }}>
                       <ModelViewer glb={current.urls.glb} usdz={current.files.usdz ? current.urls.usdz : undefined} />
                     </div>
-                  ) : (
-                    <div className="mx-6 mb-2 rounded-xl bg-brand-sand/40 px-5 py-4 flex items-center gap-3">
-                      <span className="relative flex h-3 w-3">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-terracotta opacity-60"></span>
-                        <span className="relative inline-flex rounded-full h-3 w-3 bg-brand-terracotta"></span>
-                      </span>
-                      <span className="text-sm text-gray-700">
-                        {current.files.spec ? 'Måtten är satta. Bygger modellen…' : 'Väntar på måttspecen…'}
-                      </span>
+                  ) : current.agent?.state === 'running' ? (
+                    <div className="mx-6 mb-2 rounded-xl bg-brand-sand/40 px-5 py-4">
+                      <div className="flex items-center gap-3 mb-3">
+                        <span className="relative flex h-3 w-3">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-terracotta opacity-60"></span>
+                          <span className="relative inline-flex rounded-full h-3 w-3 bg-brand-terracotta"></span>
+                        </span>
+                        <span className="text-sm font-semibold text-brand-black">{current.agent.step}</span>
+                        <span className="text-xs text-gray-500 ml-auto">
+                          {modelLabel(current.agent.model)}{current.agent.round > 0 ? ` · varv ${current.agent.round}` : ''}
+                          {(current.agent.step === 'skriver kod' || current.agent.step === 'rättar') && (current.agent.thinkingSeconds ?? 0) >= 60
+                            ? ` · tänker sedan ${Math.floor((current.agent.thinkingSeconds ?? 0) / 60)} min` : ''}
+                        </span>
+                      </div>
+                      <ol className="text-xs text-gray-600 space-y-1 font-mono">
+                        {current.agent.log.slice(-7).map((e, i) => <li key={i}>{e.msg}</li>)}
+                      </ol>
+                      {current.agent.live && <LiveFeed live={current.agent.live} />}
                     </div>
+                  ) : current.agent?.state === 'failed' ? (
+                    <div className="mx-6 mb-2 rounded-xl bg-red-50 border border-red-100 px-5 py-4">
+                      <p className="text-sm font-semibold text-brand-black mb-1">Byggagenten gav upp{current.agent.round ? ` efter ${current.agent.round} varv` : ''}.</p>
+                      <p className="text-xs text-gray-600 mb-3">Terminalen får ta över — eller försök igen.</p>
+                      <ol className="text-xs text-gray-600 space-y-1 font-mono mb-3">
+                        {current.agent.log.slice(-7).map((e, i) => <li key={i}>{e.msg}</li>)}
+                      </ol>
+                      <button onClick={handleBuildWithAgent} disabled={isStartingAgent} className="text-sm font-semibold text-brand-terracotta hover:underline disabled:opacity-50">
+                        Försök igen
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mx-6 mb-2 rounded-xl bg-brand-sand/40 px-5 py-4">
+                      <div className="flex items-center gap-3">
+                        <span className="relative flex h-3 w-3">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-terracotta opacity-60"></span>
+                          <span className="relative inline-flex rounded-full h-3 w-3 bg-brand-terracotta"></span>
+                        </span>
+                        <span className="text-sm text-gray-700">
+                          {current.files.spec ? 'Måtten är satta. Bygger modellen…' : 'Väntar på måttspecen…'}
+                        </span>
+                      </div>
+                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                        <button
+                          onClick={handleBuildWithAgent}
+                          disabled={isStartingAgent}
+                          className="text-white text-sm font-semibold py-2 px-5 rounded-full transition-all shadow hover:shadow-lg disabled:opacity-50"
+                          style={{ backgroundColor: 'var(--brand-terracotta)' }}
+                        >
+                          {isStartingAgent ? 'Startar…' : 'Bygg modellen i appen'}
+                        </button>
+                        <span className="text-xs text-gray-500">EU-hostad modell läser bilden, skriver koden och rättar sig själv — eller så gör terminalen det.</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {current.files.glb && current.agent?.state === 'done' && (
+                    <p className="px-6 pt-4 text-xs text-gray-500">
+                      Byggd i appen av {modelLabel(current.agent.model)} på {current.agent.round} {current.agent.round === 1 ? 'varv' : 'varv'}
+                      {current.agent.usage ? ` · ${((current.agent.usage.input + current.agent.usage.output) / 1000).toFixed(1)}k tokens` : ''}.
+                    </p>
                   )}
 
                   {current.spec && (

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import {
-  FAL_ENDPOINT, buildPrompt, parseFalImageUrl, saveGeneration, validateUserPrompt,
+  FAL_ENDPOINT, FAL_EDIT_ENDPOINT, ISOLATE_PROMPT, buildPrompt, parseFalImageUrl, saveGeneration, saveSkeleton, validateUserPrompt,
 } from '@/lib/lamp-pipeline';
 
 export const runtime = 'nodejs';
@@ -47,15 +47,36 @@ export async function POST(request: Request) {
       console.error(`[lampa] kunde inte hämta bilden: HTTP ${imgRes.status}`);
       return NextResponse.json({ error: 'Kunde inte hämta bilden' }, { status: 502 });
     }
+    const imageBytes = new Uint8Array(await imgRes.arrayBuffer());
     const meta = await saveGeneration({
       userPrompt,
       fullPrompt,
-      imageBytes: new Uint8Array(await imgRes.arrayBuffer()),
+      imageBytes,
       contentType: imgRes.headers.get('content-type'),
     });
 
     console.log(`[lampa] ${meta.id}: sparad i public/models/${meta.id}/${meta.imageFile}`);
-    return NextResponse.json({ id: meta.id, image: `/models/${meta.id}/${meta.imageFile}`, prompt: userPrompt, fullPrompt });
+
+    // Steg 2 — isolera den printbara delen. Best effort: misslyckas det finns originalbilden ändå.
+    let skeleton = false;
+    try {
+      const imgB64 = Buffer.from(imageBytes).toString('base64');
+      const editRes = await fetch(FAL_EDIT_ENDPOINT, {
+        method: 'POST',
+        headers: { Authorization: `Key ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: ISOLATE_PROMPT, image_urls: [`data:${imgRes.headers.get('content-type') ?? 'image/jpeg'};base64,${imgB64}`], image_size: 'square_hd', num_images: 1 }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!editRes.ok) throw new Error(`fal edit HTTP ${editRes.status}: ${(await editRes.text()).slice(0, 300)}`);
+      const skelRes = await fetch(parseFalImageUrl(await editRes.json()));
+      if (!skelRes.ok) throw new Error(`skelett HTTP ${skelRes.status}`);
+      await saveSkeleton(meta.id, new Uint8Array(await skelRes.arrayBuffer()));
+      skeleton = true;
+      console.log(`[lampa] ${meta.id}: skelett.jpg sparad`);
+    } catch (err) {
+      console.warn(`[lampa] ${meta.id}: isolering hoppades över —`, err instanceof Error ? err.message : err);
+    }
+    return NextResponse.json({ id: meta.id, image: `/models/${meta.id}/${meta.imageFile}`, skeleton, prompt: userPrompt, fullPrompt });
   } catch (err) {
     console.error('[lampa] fel:', err);
     return NextResponse.json({ error: 'Kunde inte skapa bilden' }, { status: 500 });
