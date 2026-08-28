@@ -154,6 +154,9 @@ export const LAMP_STRUCTURE_RULES =
   'with large open gaps between them, so the bulb is clearly visible through the structure and the light throws ' +
   'patterned shadows on the wall. The structure itself is the design — there is NO fabric, NO paper, NO frosted or ' +
   'translucent panels, NO solid walls, NO pleated or folded surfaces, nothing that covers the gaps. ' +
+  'The geometry is REGULAR and ROTATIONALLY SYMMETRIC around a vertical axis: straight or evenly angled struts, ' +
+  'horizontal rings, vertical slats, or a diamond/triangle lattice wrapped on a cylinder, cone, double-cone or barrel — ' +
+  'like a precise CAD model. No organic free-form curves, no woven or wobbly lines, no random mesh. ' +
   'A single continuous 3D-printed part in matte white PLA, printable without supports: struts 2–4 mm thick, ' +
   'a solid base ring with a central hole for an E27 socket, maximum 40 cm tall and 30 cm wide.';
 
