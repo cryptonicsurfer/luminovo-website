@@ -39,6 +39,10 @@ test('promptmallen bär med användartexten och kraven', () => {
   assert.match(p, /E27/);
   assert.match(p, /40 cm/);
   assert.match(p, /oak side table/);
+  // ramverkskravet är fast och ligger efter kundens brief
+  assert.match(p, /OPEN SELF-SUPPORTING FRAMEWORK/);
+  assert.match(p, /NO fabric, NO paper/);
+  assert.ok(p.indexOf('rounded ribs like a beehive') < p.indexOf('OPEN SELF-SUPPORTING'));
 });
 
 test('fal-svar utan bild ger tydligt fel', () => {

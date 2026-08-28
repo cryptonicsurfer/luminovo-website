@@ -142,18 +142,27 @@ const ENVIRONMENTS = [
 ];
 
 /**
- * Fast mall i stället för LLM-optimerad prompt. Kraven är samma som i
- * Luminovos ursprungliga mall (40 cm, E27, vit PLA) — det är dessa som
- * sedan blir mått i spec.md.
+ * Promptförstärkning — fast mall, ingen LLM. Luminovos lampor är *stommen*:
+ * öppna ramverk av stavar, gitter och ribbor som ljuset går rakt igenom
+ * (se kollektionen). Aldrig något som egentligen vill vara tyg, papper
+ * eller ett tätt skal — det blir varken printbart eller en Luminovo-lampa,
+ * och byggagenten ritar det som en massiv klump. Kundens text är
+ * *designbriefen*; ramverkskravet är fast.
  */
+export const LAMP_STRUCTURE_RULES =
+  'The shade is an OPEN SELF-SUPPORTING FRAMEWORK: a lattice, cage or skeleton of thin printed struts, ribs or slats ' +
+  'with large open gaps between them, so the bulb is clearly visible through the structure and the light throws ' +
+  'patterned shadows on the wall. The structure itself is the design — there is NO fabric, NO paper, NO frosted or ' +
+  'translucent panels, NO solid walls, NO pleated or folded surfaces, nothing that covers the gaps. ' +
+  'A single continuous 3D-printed part in matte white PLA, printable without supports: struts 2–4 mm thick, ' +
+  'a solid base ring with a central hole for an E27 socket, maximum 40 cm tall and 30 cm wide.';
+
 export function buildPrompt(userPrompt: string, pick: number = Math.floor(Math.random() * ENVIRONMENTS.length)): string {
   const env = ENVIRONMENTS[((pick % ENVIRONMENTS.length) + ENVIRONMENTS.length) % ENVIRONMENTS.length];
   return (
-    `Product photograph of a 3D-printed table lampshade in matte white PLA. ` +
-    `Design brief: ${userPrompt}. ` +
-    `Clean geometric structure that can be 3D printed without supports, ` +
-    `maximum 40 cm tall and 30 cm wide, solid base ring with a central hole for an E27 socket. ` +
-    `Warm 2700K light glowing from inside, standing on ${env}, Scandinavian minimalist interior, ` +
+    `Product photograph of a 3D-printed table lamp. Design brief from the customer: "${userPrompt}". ` +
+    LAMP_STRUCTURE_RULES + ' ' +
+    `Warm 2700K bulb glowing inside the framework, standing on ${env}, Scandinavian minimalist interior, ` +
     `soft natural daylight, no people, no other objects.`
   );
 }

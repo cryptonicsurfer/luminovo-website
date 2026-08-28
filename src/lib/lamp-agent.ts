@@ -112,10 +112,11 @@ KONVENTIONER (samma som build123d-tests/CLAUDE.md):
 - Printkonstanter: bädd 250 × 210 × 220 mm (Z ≤ 220!), minsta vägg 0.8 mm, inga stöd.
   Lampskärm: max 40 cm hög (i praktiken ≤ 210 pga bädden), E27-hål 40.5 mm centrerat i bottenplattan.
 - Bara den printade delen: ingen glödlampa, ingen frostad innerskärm, ingen möbel.
-- SKÄRMEN MÅSTE VARA IHÅLIG: ljuset ska ut och lampan ska få plats. Väggar/lameller
-  1.2–3 mm, öppen struktur eller tunt skal — aldrig en massiv kropp. Riktvärde: volymen
-  ska vara under 15 % av den omslutande cylindern — ett skal med 2 mm vägg landar runt 10 %,
-  en spjälbur runt 7 %. En massiv del avvisas och skickas tillbaka.
+- SKÄRMEN ÄR ETT ÖPPET RAMVERK: stavar, spjälor, ringar, gitter — med stora öppningar som
+  ljuset går rakt igenom och med tomt utrymme i mitten för glödlampan (Ø ≥ 70 mm fritt
+  kring axeln ovanför bottenplattan). Stavar 2–4 mm. Aldrig en massiv kropp, aldrig ett
+  tätt skal, aldrig lameller från ett nav. Riktvärde: volymen under 15 % av den omslutande
+  cylindern — en spjälbur landar runt 7 %. En massiv del avvisas och skickas tillbaka.
 
 BUILD123D-LATHUND (0.11):
   from build123d import *
@@ -216,7 +217,7 @@ export function solidityProblem(output: string): string | null {
   if (!(cyl > 0)) return null;
   const fill = vol / cyl;
   if (fill <= MAX_FILL) return null;
-  return `FEL: delen är massiv — volymen ${vol.toFixed(0)} cm3 är ${(fill * 100).toFixed(0)} % av den omslutande cylindern (max ${MAX_FILL * 100} %; ett tunt skal med 2 mm vägg ger ~10 %, en spjälbur ~7 %). Skärmen måste vara ett tunt skal eller en öppen struktur som ljuset går igenom — subtrahera innerkroppen (Mode.SUBTRACT) eller bygg av tunna element. Bottenplattan får vara massiv.`;
+  return `FEL: delen är massiv — volymen ${vol.toFixed(0)} cm3 är ${(fill * 100).toFixed(0)} % av den omslutande cylindern (max ${MAX_FILL * 100} %; en spjälbur ger ~7 %). Skärmen ska vara ett öppet ramverk av stavar/ringar/gitter med tomt utrymme i mitten för glödlampan — inga fyllda kroppar, inga lameller från ett nav. Bottenplattan får vara massiv.`;
 }
 
 /** Radar ur build.py-utskriften som är värda att visa på sidan. */
