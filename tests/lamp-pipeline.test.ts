@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   buildPrompt, isValidId, listModels, modelDir, newId, parseFalImageUrl, readModel,
-  saveGeneration, validateUserPrompt, imageExtFor,
+  saveGeneration, validateUserPrompt, imageExtFor, parseMeta, modelIdFromImageUrl, readModelImage,
 } from '../src/lib/lamp-pipeline.ts';
 
 test('id-validering stoppar traversal och tillåter våra id:n', () => {
@@ -58,7 +58,8 @@ test('spara → läsa → lista, och glb-flaggan slår om när filen dyker upp',
   const base = await mkdtemp(path.join(tmpdir(), 'lampa-'));
   try {
     const id = 'lampa-20260828-120000';
-    await saveGeneration({ id, userPrompt: 'test', fullPrompt: 'full', imageBytes: new Uint8Array([1, 2, 3]), contentType: 'image/jpeg' }, base);
+    const meta = await saveGeneration({ id, userPrompt: 'test', fullPrompt: 'full', imageBytes: new Uint8Array([1, 2, 3]), contentType: 'image/jpeg' }, base);
+    assert.equal(meta.id, id);
     let m = await readModel(id, base);
     assert.ok(m);
     assert.equal(m.files.image, true);
@@ -75,10 +76,51 @@ test('spara → läsa → lista, och glb-flaggan slår om när filen dyker upp',
     // en mapp utan meta.json är inte en modell, och skräpnamn ignoreras
     await mkdir(path.join(base, 'lampa-20260828-130000'));
     await mkdir(path.join(base, '..hidden'));
+    // trasig meta (saknar imageFile) och elak meta (imageFile med ..) får inte fälla listan
+    await mkdir(path.join(base, 'lampa-20260828-140000'));
+    await writeFile(path.join(base, 'lampa-20260828-140000', 'meta.json'), '{"id":"lampa-20260828-140000","userPrompt":"x","fullPrompt":"y"}');
+    await mkdir(path.join(base, 'lampa-20260828-150000'));
+    await writeFile(path.join(base, 'lampa-20260828-150000', 'meta.json'), JSON.stringify({ id: 'lampa-20260828-150000', userPrompt: 'x', fullPrompt: 'y', imageFile: '../../etc/passwd' }));
+    await mkdir(path.join(base, 'lampa-20260828-160000'));
+    await writeFile(path.join(base, 'lampa-20260828-160000', 'meta.json'), 'inte json');
     const list = await listModels(base);
     assert.deepEqual(list.map((x) => x.id), [id]);
     assert.equal(await readModel('finns-inte', base), null);
+
+    // bilden läses från disk för prissättning
+    const img = await readModelImage(id, base);
+    assert.equal(img?.mimeType, 'image/jpeg');
+    assert.equal(img?.base64, Buffer.from([1, 2, 3]).toString('base64'));
+    assert.equal(await readModelImage('lampa-20260828-150000', base), null);
+
+    // samma sekund två gånger -> unikt id, ingen överskrivning
+    const meta2 = await saveGeneration({ id, userPrompt: 't2', fullPrompt: 'f2', imageBytes: new Uint8Array([9]), contentType: 'image/png' }, base);
+    assert.equal(meta2.id, `${id}-2`);
+    assert.equal((await readModel(id, base))?.meta.userPrompt, 'test');
+    assert.equal((await readModel(`${id}-2`, base))?.meta.imageFile, 'bild.png');
   } finally {
     await rm(base, { recursive: true, force: true });
   }
+});
+
+test('parseMeta släpper bara igenom giltig meta', () => {
+  const ok = { id: 'lampa-1', userPrompt: 'a', fullPrompt: 'b', imageFile: 'bild.jpg' };
+  assert.ok(parseMeta(ok, 'lampa-1'));
+  assert.equal(parseMeta({ ...ok, id: 'annan' }, 'lampa-1'), null);
+  assert.equal(parseMeta({ ...ok, imageFile: '../x.jpg' }, 'lampa-1'), null);
+  assert.equal(parseMeta({ ...ok, imageFile: 'bild.exe' }, 'lampa-1'), null);
+  assert.equal(parseMeta({ ...ok, userPrompt: 1 }, 'lampa-1'), null);
+  assert.equal(parseMeta(null, 'lampa-1'), null);
+  assert.equal(parseMeta('str', 'lampa-1'), null);
+});
+
+test('modelIdFromImageUrl accepterar bara sajtens egna bilder', () => {
+  assert.equal(modelIdFromImageUrl('/models/lampa-20260828-142604/bild.jpg'), 'lampa-20260828-142604');
+  assert.equal(modelIdFromImageUrl('/models/lampa-1/bild.webp'), 'lampa-1');
+  assert.equal(modelIdFromImageUrl('http://localhost:9999/x'), null);
+  assert.equal(modelIdFromImageUrl('http://169.254.169.254/latest/meta-data'), null);
+  assert.equal(modelIdFromImageUrl('data:image/png;base64,AAAA'), null);
+  assert.equal(modelIdFromImageUrl('/models/../secret/bild.jpg'), null);
+  assert.equal(modelIdFromImageUrl('/models/lampa-1/del.py'), null);
+  assert.equal(modelIdFromImageUrl(undefined), null);
 });

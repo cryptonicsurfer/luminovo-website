@@ -40,35 +40,17 @@ interface PricingResult {
 }
 
 export async function estimateLampPrice(
-  imageUrl: string,
+  image: { base64: string; mimeType: string },
   lampDescription?: string
 ): Promise<PricingResult> {
   try {
-    // Om det är en base64-bild
-    let imagePart;
-    if (imageUrl.startsWith('data:image')) {
-      const base64Data = imageUrl.split(',')[1];
-      const mimeType = imageUrl.split(',')[0].split(':')[1].split(';')[0];
-
-      imagePart = {
-        inlineData: {
-          data: base64Data,
-          mimeType: mimeType,
-        },
-      };
-    } else {
-      // Om det är en URL, hämta bilden först
-      const response = await fetch(imageUrl);
-      const arrayBuffer = await response.arrayBuffer();
-      const base64 = Buffer.from(arrayBuffer).toString('base64');
-
-      imagePart = {
-        inlineData: {
-          data: base64,
-          mimeType: 'image/png',
-        },
-      };
-    }
+    // Bilden kommer alltid från disk (lamp-pipeline.readModelImage) — ingen URL-hämtning här.
+    const imagePart = {
+      inlineData: {
+        data: image.base64,
+        mimeType: image.mimeType,
+      },
+    };
 
     const userPrompt = lampDescription
       ? `Analysera denna lampskärm och bedöm dess komplexitet. Beskrivning: ${lampDescription}`

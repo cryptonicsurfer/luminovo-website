@@ -31,6 +31,11 @@ roterbar 3D-vy (och AR på iPhone) utan att någon laddar upp något manuellt.
 
 ## Utanför scope
 
+- Rate limit / kostnadsspärr på `POST /api/generate-lampshade`. Medvetet: lokal demo.
+  **Kör inte dev-servern med `-H 0.0.0.0` på labbets wifi** — då kan rummet tömma fal-nyckeln.
+- SRI på tredjepartsskript (model-viewer, Tailwind-CDN) — ärvt från upstream.
+- `/api/orders` och `/api/newsletter` skriver till Directus utan auth/rate limit — ärvt, orört.
+
 - Deploy. Detta är en **lokal demo-arkitektur**: servern skriver till
   `public/` i runtime, vilket inte fungerar på Vercel. Körs med `npm run dev`.
 - Auth. Sajten var publik utan auth förut och körs bara lokalt nu.
@@ -46,12 +51,12 @@ roterbar 3D-vy (och AR på iPhone) utan att någon laddar upp något manuellt.
 | `/api/generate-lampshade` | POST | public — lokal demo, ingen auth i appen sedan tidigare | omskriven (fal) |
 | `/api/models` | GET | public — läser bara `public/models/`, samma data som redan är statiskt servad | ny |
 | `/api/models/[id]` | GET | public — dito; `id` valideras mot `^[a-z0-9-]{3,64}$` (ingen path traversal) | ny |
-| `/api/estimate-price` | POST | public — oförändrad | — |
+| `/api/estimate-price` | POST | public — tar nu bara `/models/<id>/bild.*` och läser från disk (var: `fetch(imageUrl)` mot valfri URL = blind SSRF) | ändrad |
 | `/api/orders` | POST | public — oförändrad | — |
 | `/api/newsletter` | POST | public — oförändrad | — |
 | `/api/isolate-lamp` | — | — | **borttagen** |
 | `/api/convert-to-3d` | — | — | **borttagen** |
-| `/api/proxy-glb` | — | — | **borttagen** (var en öppen SSRF-proxy mot valfri URL) |
+| `/api/proxy-glb` | — | — | **borttagen** (oautentiserad proxy för Meshy-assets, värdlåst men `ACAO: *` och obegränsad buffring) |
 
 ## Datändringar
 
@@ -69,7 +74,9 @@ Inga tabeller. Filsystem: `public/models/<id>/` (gitignorerad, `.gitkeep` kvar).
   (`bild.jpg`, `modell.glb`, `modell.usdz`, `preview.png`, `spec.md`, `del.py`,
   `meta.json`) — vi listar aldrig godtyckliga filer.
 - Felsvar till klienten är generiska; fal:s felkropp loggas bara server-side.
-- Borttagningen av `/api/proxy-glb` stänger en SSRF-yta.
+- `/api/estimate-price` hämtade tidigare `imageUrl` från klienten med `fetch` (blind SSRF). Nu accepteras bara sajtens egna bilder, uppslagna via `modelDir()` och lästa från disk.
+- `meta.json` valideras vid inläsning (`parseMeta`): `imageFile` mot `^bild\.(jpg|png|webp)$`, id måste matcha mappen. En trasig mapp hoppas över i listan i stället för att fälla `/api/models`.
+- Modellmappen skapas exklusivt (`mkdir` utan `recursive`); kollision samma sekund ger `<id>-2`.
 - Ingen ny dependency; lockfilen rörs inte.
 
 ## Testplan
@@ -80,7 +87,7 @@ Inga tabeller. Filsystem: `public/models/<id>/` (gitignorerad, `.gitkeep` kvar).
 2. Dev-server igång: `POST /api/generate-lampshade {"userPrompt":"spjälor"}`
    → 200 med `{id, image}`, och `public/models/<id>/bild.jpg` + `meta.json` finns.
 3. `POST /api/generate-lampshade {}` → 400. `{"userPrompt":"x"}` → 400.
-4. `GET /api/models/../../etc` → 400. `GET /api/models/finns-inte` → 404.
+4. `GET /api/models/A_B` → 400 (regex). `GET /api/models/..%2F..%2Fetc` → 400 eller Nexts 404 — routern normaliserar `..` innan handlern nås, regexen är skyddet. `GET /api/models/finns-inte` → 404.
 5. `GET /api/models/<id>` → `glb: false`; kör
    `uv run python tools/build.py parts/lampa_spjala.py --publish ../luminovo-website/public/models/<id> --spec ref/lampa_spec.md`
    → `GET` igen → `glb: true`, och sidan visar `<model-viewer>` utan reload.

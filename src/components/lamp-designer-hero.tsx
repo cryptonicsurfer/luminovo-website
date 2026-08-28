@@ -32,6 +32,7 @@ function SpecView({ text }: { text: string }) {
         i++;
       }
       const [head, ...body] = rows;
+      if (!head) continue;   // bara separatorrader — ingen tabell att rita
       blocks.push(
         <div key={i} className="overflow-x-auto my-3">
           <table className="w-full text-sm">

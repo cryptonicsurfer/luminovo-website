@@ -30,6 +30,10 @@ const IMAGE_EXT: Record<string, string> = {
   'image/png': 'png',
   'image/webp': 'webp',
 };
+const MIME_FOR_EXT: Record<string, string> = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+
+/** Bildfilen i meta.json får bara heta så här — meta skrivs till disk och läses tillbaka okritiskt annars. */
+export const IMAGE_FILE_RE = /^bild\.(jpg|png|webp)$/;
 
 export interface ModelMeta {
   id: string;
@@ -122,15 +126,33 @@ async function exists(p: string): Promise<boolean> {
   try { await fs.access(p); return true; } catch { return false; }
 }
 
+/** Kontrollerar att det som lästes från disk verkligen är en ModelMeta. */
+export function parseMeta(raw: unknown, id: string): ModelMeta | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const m = raw as Record<string, unknown>;
+  if (m.id !== id) return null;
+  if (typeof m.imageFile !== 'string' || !IMAGE_FILE_RE.test(m.imageFile)) return null;
+  if (typeof m.userPrompt !== 'string' || typeof m.fullPrompt !== 'string') return null;
+  return {
+    id,
+    userPrompt: m.userPrompt,
+    fullPrompt: m.fullPrompt,
+    imageFile: m.imageFile,
+    model: typeof m.model === 'string' ? m.model : '',
+    createdAt: typeof m.createdAt === 'string' ? m.createdAt : '',
+  };
+}
+
 export async function readModel(id: string, baseDir: string = MODELS_DIR): Promise<ModelInfo | null> {
   const dir = modelDir(id, baseDir);
   if (!dir) return null;
-  let meta: ModelMeta;
+  let meta: ModelMeta | null;
   try {
-    meta = JSON.parse(await fs.readFile(path.join(dir, MODEL_FILES.meta), 'utf8'));
+    meta = parseMeta(JSON.parse(await fs.readFile(path.join(dir, MODEL_FILES.meta), 'utf8')), id);
   } catch {
     return null;
   }
+  if (!meta) return null;
   const has = async (name: string) => exists(path.join(dir, name));
   const files = {
     image: await has(meta.imageFile),
@@ -170,28 +192,70 @@ export async function listModels(baseDir: string = MODELS_DIR): Promise<ModelInf
   names.sort().reverse();
   const out: ModelInfo[] = [];
   for (const n of names) {
-    const m = await readModel(n, baseDir);
-    if (m) out.push(m);
+    try {
+      const m = await readModel(n, baseDir);
+      if (m) out.push(m);
+    } catch {
+      // en trasig mapp får inte fälla listan
+    }
   }
   return out;
 }
 
+/** Läser modellens bild från disk (för prissättning) — aldrig via URL. */
+export async function readModelImage(
+  id: string, baseDir: string = MODELS_DIR,
+): Promise<{ base64: string; mimeType: string } | null> {
+  const m = await readModel(id, baseDir);
+  if (!m || !m.files.image) return null;
+  const dir = modelDir(id, baseDir)!;
+  const bytes = await fs.readFile(path.join(dir, m.meta.imageFile));
+  const ext = m.meta.imageFile.split('.').pop() ?? 'jpg';
+  return { base64: bytes.toString('base64'), mimeType: MIME_FOR_EXT[ext] ?? 'image/jpeg' };
+}
+
+/** Plockar id ur en sajt-relativ bild-URL som /models/<id>/bild.jpg, annars null. */
+export function modelIdFromImageUrl(url: unknown): string | null {
+  if (typeof url !== 'string') return null;
+  const m = /^\/models\/([a-z0-9-]{3,64})\/(bild\.(?:jpg|png|webp))$/.exec(url);
+  return m && isValidId(m[1]) ? m[1] : null;
+}
+
+/**
+ * Skapar modellmappen exklusivt. Två anrop samma sekund får samma tidsstämpel —
+ * då blir den andra `<id>-2`, `<id>-3` … i stället för att skriva över.
+ */
+export async function createModelDir(baseId: string, baseDir: string = MODELS_DIR): Promise<string> {
+  await fs.mkdir(baseDir, { recursive: true });
+  for (let n = 1; n <= 50; n++) {
+    const id = n === 1 ? baseId : `${baseId}-${n}`;
+    const dir = modelDir(id, baseDir);
+    if (!dir) throw new Error('ogiltigt id');
+    try {
+      await fs.mkdir(dir);
+      return id;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+  }
+  throw new Error('kunde inte hitta ett ledigt id');
+}
+
 export async function saveGeneration(
-  args: { id: string; userPrompt: string; fullPrompt: string; imageBytes: Uint8Array; contentType: string | null },
+  args: { userPrompt: string; fullPrompt: string; imageBytes: Uint8Array; contentType: string | null; id?: string },
   baseDir: string = MODELS_DIR,
 ): Promise<ModelMeta> {
-  const dir = modelDir(args.id, baseDir);
-  if (!dir) throw new Error('ogiltigt id');
+  const id = await createModelDir(args.id ?? newId(), baseDir);
+  const dir = modelDir(id, baseDir)!;
   const imageFile = `bild.${imageExtFor(args.contentType)}`;
   const meta: ModelMeta = {
-    id: args.id,
+    id,
     userPrompt: args.userPrompt,
     fullPrompt: args.fullPrompt,
     imageFile,
     model: FAL_MODEL,
     createdAt: new Date().toISOString(),
   };
-  await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, imageFile), args.imageBytes);
   await fs.writeFile(path.join(dir, MODEL_FILES.meta), JSON.stringify(meta, null, 2));
   return meta;

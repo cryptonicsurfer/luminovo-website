@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import {
-  FAL_ENDPOINT, buildPrompt, newId, parseFalImageUrl, saveGeneration, validateUserPrompt,
+  FAL_ENDPOINT, buildPrompt, parseFalImageUrl, saveGeneration, validateUserPrompt,
 } from '@/lib/lamp-pipeline';
 
 export const runtime = 'nodejs';
@@ -27,9 +27,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Beskriv lampan med 2–400 tecken' }, { status: 400 });
   }
 
-  const id = newId();
   const fullPrompt = buildPrompt(userPrompt);
-  console.log(`[lampa] ${id}: "${userPrompt}"`);
+  console.log(`[lampa] ny generering: "${userPrompt}"`);
 
   try {
     const falRes = await fetch(FAL_ENDPOINT, {
@@ -49,15 +48,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Kunde inte hämta bilden' }, { status: 502 });
     }
     const meta = await saveGeneration({
-      id,
       userPrompt,
       fullPrompt,
       imageBytes: new Uint8Array(await imgRes.arrayBuffer()),
       contentType: imgRes.headers.get('content-type'),
     });
 
-    console.log(`[lampa] ${id}: sparad i public/models/${id}/${meta.imageFile}`);
-    return NextResponse.json({ id, image: `/models/${id}/${meta.imageFile}`, prompt: userPrompt, fullPrompt });
+    console.log(`[lampa] ${meta.id}: sparad i public/models/${meta.id}/${meta.imageFile}`);
+    return NextResponse.json({ id: meta.id, image: `/models/${meta.id}/${meta.imageFile}`, prompt: userPrompt, fullPrompt });
   } catch (err) {
     console.error('[lampa] fel:', err);
     return NextResponse.json({ error: 'Kunde inte skapa bilden' }, { status: 500 });
