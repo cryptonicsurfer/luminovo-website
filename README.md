@@ -23,6 +23,9 @@
 > som en språkmodell skrivit, lokalt — det är avsikten, och skälet till att detta aldrig
 > deployas. Spec: `specs/tensorx-byggagent.md`.
 >
+> `npm run dev` binder bara `127.0.0.1` — med flit. Sätt inte `-H 0.0.0.0` på ett
+> delat wifi: båda endpoints är publika och den ena kör kod.
+>
 > Nycklar: `FAL_API_KEY`, `TENSORX_API_KEY` i `.env.local` (se `.env.example`). Spec:
 > `specs/fal-och-terminalbyggd-3d.md`. Tester: `npm test`.
 

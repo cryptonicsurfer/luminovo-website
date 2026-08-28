@@ -14,7 +14,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  MODEL_FILES, type AgentStatus, type AgentLogEntry, isValidId, modelDir, readModel, readModelImage,
+  MODEL_FILES, STALE_RUN_MS, type AgentStatus, type AgentLogEntry, isValidId, modelDir, readModel, readModelImage,
 } from './lamp-pipeline.ts';
 
 export const MAX_ROUNDS = 3;
@@ -24,7 +24,7 @@ export const BUILD_TIMEOUT_MS = 180_000;
 export const MODEL_TIMEOUT_MS = 300_000;
 /** Reasoning-tokens räknas som output hos TensorX — 16k räckte inte alltid till svaret. */
 export const MAX_OUTPUT_TOKENS = 32_000;
-export const STALE_RUN_MS = 10 * 60_000;
+export { STALE_RUN_MS };
 
 // ---------- meddelandetyper (OpenAI-format) ----------
 export type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
@@ -68,6 +68,29 @@ export function parseAgentReply(text: string): { spec?: string; code?: string } 
   const code = afterHeading(/#{1,4}\s*`?del\.py`?/i) ?? byLang(/python|py/);
   const spec = afterHeading(/#{1,4}\s*`?spec\.md`?/i) ?? byLang(/markdown|md/);
   return { spec: spec?.trim() ? spec.trimEnd() + '\n' : undefined, code: code?.trim() ? code.trimEnd() + '\n' : undefined };
+}
+
+/**
+ * Modellens kod körs lokalt. userPrompt är en publik injektionskanal
+ * (POST /api/generate-lampshade → meta.json → prompten), så koden får bara
+ * använda build123d och math — allt annat avvisas innan den körs.
+ */
+const ALLOWED_IMPORT = /^\s*(from\s+build123d\s+import\s+[\w*,\s]+|import\s+math|from\s+math\s+import\s+[\w,\s]+)\s*(#.*)?$/;
+const FORBIDDEN_CALLS = /\b(__import__|exec|eval|compile|open|getattr|setattr|globals|locals|vars|breakpoint|input|__builtins__)\s*\(/;
+const FORBIDDEN_MODULES = /\b(os|sys|subprocess|socket|urllib|requests|shutil|pathlib|importlib|ctypes|http|ftplib|smtplib|pickle|marshal|builtins|signal|threading|multiprocessing)\s*\./;
+
+export function checkCodeSafety(code: string): string[] {
+  const problems: string[] = [];
+  code.split('\n').forEach((line, i) => {
+    const n = i + 1;
+    if (/^\s*(import|from)\s/.test(line) && !ALLOWED_IMPORT.test(line)) problems.push(`rad ${n}: otillåten import — bara \`from build123d import *\` och \`import math\` är tillåtna`);
+    const c = FORBIDDEN_CALLS.exec(line);
+    if (c) problems.push(`rad ${n}: \`${c[1]}(\` är inte tillåtet`);
+    const m = FORBIDDEN_MODULES.exec(line);
+    if (m) problems.push(`rad ${n}: \`${m[1]}.\` är inte tillåtet`);
+    if (/__builtins__|__class__|__subclasses__|__globals__/.test(line)) problems.push(`rad ${n}: dunder-åtkomst är inte tillåten`);
+  });
+  return problems;
 }
 
 /** Byter ut modellens NAMN-rad så outputfilerna heter som vi bestämt. */
@@ -237,12 +260,18 @@ export async function runBuildAgent(input: AgentInput, deps: AgentDeps): Promise
     }
     if (!spec) spec = `# Kravspec — ${input.id}\n\n(modellen lämnade ingen spec)\n`;
 
-    await log('Bygger, validerar och renderar', 'bygger');
     let result: BuildResult;
-    try {
-      result = await deps.runBuild(input.id, withForcedName(parsed.code, agentPartName(input.id)), spec);
-    } catch (err) {
-      result = { ok: false, output: `Byggkörningen kraschade: ${err instanceof Error ? err.message : String(err)}` };
+    const problems = checkCodeSafety(parsed.code);
+    if (problems.length) {
+      await log(`Koden avvisades innan körning (${problems.length} problem)`, 'avvisar kod');
+      result = { ok: false, output: `Koden avvisades innan körning:\n${problems.map((p) => `- ${p}`).join('\n')}\nTillåtet: \`from build123d import *\` och \`import math\`. Inga filer, inget nätverk, ingen os/sys.` };
+    } else {
+      await log('Bygger, validerar och renderar', 'bygger');
+      try {
+        result = await deps.runBuild(input.id, withForcedName(parsed.code, agentPartName(input.id)), spec);
+      } catch (err) {
+        result = { ok: false, output: `Byggkörningen kraschade: ${err instanceof Error ? err.message : String(err)}` };
+      }
     }
     for (const line of summarizeBuildOutput(result.output)) await log(line);
 
@@ -301,17 +330,29 @@ export function tensorxCaller(env: AgentEnv): AgentDeps['callModel'] {
   };
 }
 
+/** Barnprocessen får INTE ärva serverns miljö (API-nycklar). Bara det uv/python/blender behöver. */
+const CHILD_ENV_KEYS = /^(PATH|HOME|TMPDIR|LANG|LC_[A-Z_]+|UV_[A-Z_]+|VIRTUAL_ENV|SHELL|USER|LOGNAME|TERM)$/;
+export function childEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => CHILD_ENV_KEYS.test(e[0]) && typeof e[1] === 'string'));
+}
+
 function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, env: process.env });
+    // detached = egen processgrupp, så timeouten dödar python + blender, inte bara uv-wrappern
+    const child = spawn(cmd, args, { cwd, env: childEnv() as NodeJS.ProcessEnv, detached: true });
     let out = '';
     const push = (chunk: Buffer) => { out += chunk.toString(); if (out.length > 200_000) out = out.slice(-200_000); };
     child.stdout.on('data', push);
     child.stderr.on('data', push);
-    const timer = setTimeout(() => { child.kill('SIGKILL'); out += `\n[timeout efter ${timeoutMs / 1000} s]`; }, timeoutMs);
+    const killAll = () => { try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } };
+    const timer = setTimeout(() => { killAll(); out += `\n[timeout efter ${timeoutMs / 1000} s]`; }, timeoutMs);
     child.on('error', (err) => { clearTimeout(timer); resolve({ code: null, out: out + `\n${err.message}` }); });
     child.on('close', (code) => { clearTimeout(timer); resolve({ code, out }); });
   });
+}
+
+export function buildSucceeded(exit: number | null, glbMtimeMs: number, startedMs: number): boolean {
+  return exit === 0 && glbMtimeMs >= startedMs - 1000;
 }
 
 export function localBuildRunner(env: AgentEnv): AgentDeps['runBuild'] {
@@ -329,6 +370,7 @@ export function localBuildRunner(env: AgentEnv): AgentDeps['runBuild'] {
 
     const previewPath = path.join(env.build123dDir, 'out', `${name}_preview.png`);
     await fs.rm(previewPath, { force: true });
+    const startedMs = Date.now();
 
     const { code: exit, out } = await run(
       'uv', ['run', 'python', 'tools/build.py', partsRel, '--publish', outDir, '--spec', specRel],
@@ -336,7 +378,10 @@ export function localBuildRunner(env: AgentEnv): AgentDeps['runBuild'] {
     );
     let previewB64: string | undefined;
     try { previewB64 = (await fs.readFile(previewPath)).toString('base64'); } catch { /* ingen rendering */ }
-    const ok = exit === 0 && /publicerad:/.test(out);
+    // Modellens kod kan skriva vad som helst till stdout — sanningen är om build.py faktiskt publicerade GLB:n nu.
+    let glbMtime = 0;
+    try { glbMtime = (await fs.stat(path.join(outDir, MODEL_FILES.glb))).mtimeMs; } catch { /* ingen glb */ }
+    const ok = buildSucceeded(exit, glbMtime, startedMs);
     return { ok, output: out.slice(-4000), previewB64 };
   };
 }
@@ -357,6 +402,9 @@ export async function writeAgentStatus(id: string, status: AgentStatus): Promise
   const tmp = path.join(dir, `${MODEL_FILES.agent}.tmp`);
   await fs.writeFile(tmp, JSON.stringify(status, null, 2));
   await fs.rename(tmp, path.join(dir, MODEL_FILES.agent));
+  // livstecken: låsets mtime är det som avgör om en körning räknas som död
+  const now = new Date();
+  await fs.utimes(path.join(dir, 'agent.lock'), now, now).catch(() => {});
 }
 
 async function readExamples(build123dDir: string): Promise<{ name: string; code: string }[]> {
@@ -382,7 +430,9 @@ export async function acquireLock(id: string): Promise<boolean> {
     try {
       const st = await fs.stat(lock);
       if (Date.now() - st.mtimeMs > STALE_RUN_MS) {
-        await fs.writeFile(lock, new Date().toISOString());
+        // dött lås: ta bort och försök exklusivt igen — två övertagare kan inte båda lyckas med wx
+        await fs.rm(lock, { force: true });
+        await fs.writeFile(lock, new Date().toISOString(), { flag: 'wx' });
         return true;
       }
     } catch { /* fallthrough */ }

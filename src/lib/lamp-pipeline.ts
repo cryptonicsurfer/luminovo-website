@@ -40,6 +40,26 @@ export interface AgentStatus {
 }
 const AGENT_STATES = new Set(['running', 'done', 'failed']);
 const MAX_LOG_ENTRIES = 200;
+/** En körning som inte hörts av på så länge räknas som död (låset tas över, UI:t visar "avbruten"). */
+export const STALE_RUN_MS = 10 * 60_000;
+
+/** Senaste livstecken: sista loggraden, annars starttiden. */
+export function lastActivityMs(a: AgentStatus): number {
+  const last = a.log.length ? a.log[a.log.length - 1].t : a.startedAt;
+  const t = Date.parse(last);
+  return Number.isFinite(t) ? t : Date.parse(a.startedAt) || 0;
+}
+
+/** running utan livstecken på STALE_RUN_MS → failed, så sidan får en "försök igen"-knapp i stället för evig spinner. */
+export function markStale(a: AgentStatus, nowMs: number = Date.now()): AgentStatus {
+  if (a.state !== 'running' || nowMs - lastActivityMs(a) < STALE_RUN_MS) return a;
+  return {
+    ...a,
+    state: 'failed',
+    step: 'avbruten',
+    log: [...a.log, { t: new Date(nowMs).toISOString(), msg: 'Körningen dog utan att avslutas (startade servern om?) — försök igen' }],
+  };
+}
 
 /** Fail-closed: en trasig agent.json ger null, aldrig ett kastat fel. */
 export function parseAgentStatus(raw: unknown): AgentStatus | null {
@@ -208,6 +228,7 @@ export async function readModel(id: string, baseDir: string = MODELS_DIR): Promi
   let agent: AgentStatus | null = null;
   try {
     agent = parseAgentStatus(JSON.parse(await fs.readFile(path.join(dir, MODEL_FILES.agent), 'utf8')));
+    if (agent) agent = markStale(agent);
   } catch {
     agent = null;
   }
