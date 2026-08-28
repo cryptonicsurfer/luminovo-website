@@ -46,6 +46,11 @@ får ta över — inget annat ändras.
      `__import__(` och modulåtkomst som `os.`, `sys.`, `subprocess.`, `socket.`,
      `urllib.` avvisas. Avvisad kod räknas som ett misslyckat varv och skickas
      tillbaka till modellen med orsaken.
+  7b. **Massiv-kontroll** (`solidityProblem`): volym / omslutande cylinder > 15 % →
+     räknas som byggfel och skickas tillbaka ("tunt skal ~10 %, spjälbur ~7 %").
+     Kom ur end-to-end-testet: en plisserad skärm blev en 1,4 kg massiv trumma som
+     såg rätt ut utifrån. Kontrollen fångar *massiv*, inte *plats för glödlampan* —
+     radiella fenor från ett nav passerar. Känd gräns.
   7. Bygget körs som egen processgrupp med **minimal miljö** (PATH, HOME, TMPDIR,
      LANG/LC_*, UV_*) — inga API-nycklar ärvs. Timeout dödar hela gruppen
      (python + blender, inte bara uv). Lyckat = exit 0 **och** `modell.glb` har

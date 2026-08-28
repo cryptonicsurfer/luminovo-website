@@ -23,8 +23,11 @@
 > som en språkmodell skrivit, lokalt — det är avsikten, och skälet till att detta aldrig
 > deployas. Spec: `specs/tensorx-byggagent.md`.
 >
-> `npm run dev` binder bara `127.0.0.1` — med flit. Sätt inte `-H 0.0.0.0` på ett
-> delat wifi: båda endpoints är publika och den ena kör kod.
+> `npm run dev` binder bara `127.0.0.1` — med flit. För QR-akten (publiken snurrar
+> modellen och öppnar AR på sina telefoner) finns `npm run dev:lan` (0.0.0.0) — kör
+> det **bara på ett wifi ni litar på och bara under den akten**: båda endpoints är
+> publika, den ena kostar pengar och den andra kör kod. Alternativet utan LAN är att
+> ladda ner USDZ:n på Macen och AirDroppa den till telefonen.
 >
 > Nycklar: `FAL_API_KEY`, `TENSORX_API_KEY` i `.env.local` (se `.env.example`). Spec:
 > `specs/fal-och-terminalbyggd-3d.md`. Tester: `npm test`.

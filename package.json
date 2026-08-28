@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "eslint",
     "generate-image": "node generate-lampshade.js",
-    "test": "node --experimental-strip-types --test \"tests/**/*.test.ts\""
+    "test": "node --experimental-strip-types --test \"tests/**/*.test.ts\"",
+    "dev:lan": "next dev --turbopack -H 0.0.0.0"
   },
   "dependencies": {
     "@google/genai": "^1.20.0",
