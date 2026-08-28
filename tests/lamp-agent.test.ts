@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAgentReply, withForcedName, runBuildAgent, summarizeBuildOutput, buildSystemPrompt, MAX_ROUNDS,
-  checkCodeSafety, childEnv, buildSucceeded, solidityProblem, withOneRetry, maxOutputTokens,
+  checkCodeSafety, childEnv, buildSucceeded, solidityProblem, withOneRetry, maxOutputTokens, parseSseStream,
   type AgentDeps, type AgentInput, type ChatMessage, type BuildResult,
 } from '../src/lib/lamp-agent.ts';
 import { parseAgentStatus, markStale, STALE_RUN_MS } from '../src/lib/lamp-pipeline.ts';
@@ -301,4 +301,50 @@ test('hjärtslag under modellanropet håller statusen levande', async () => {
   assert.equal(s.state, 'done');
   assert.ok(beats.length >= 3, `förväntade minst 3 hjärtslag, fick ${beats.length}`);
   assert.ok(s.updatedAt);
+});
+
+async function* fakeSse(chunks: unknown[]) {
+  for (const c of chunks) { yield 'data: ' + JSON.stringify(c); yield ''; }
+  yield 'data: [DONE]';
+}
+
+test('parseSseStream: reasoning räknas men returneras inte, content byggs, usage i sista chunken', async () => {
+  const seen: { r: number; c: number; tail: string }[] = [];
+  const reply = await parseSseStream(fakeSse([
+    { choices: [{ delta: { reasoning_content: 'Bilden visar ' } }] },
+    { choices: [{ delta: { reasoning_content: 'en bur.\nRäknar stavar' } }] },
+    { choices: [{ delta: { content: '### spec.md\n' } }] },
+    { choices: [{ delta: { content: [{ type: 'text', text: '```markdown\n# x\n```' }] }, finish_reason: 'stop' }] },
+    { choices: [], usage: { prompt_tokens: 100, completion_tokens: 50 } },
+  ]), (p) => seen.push({ r: p.reasoningChars, c: p.contentChars, tail: p.reasoningTail }));
+  assert.equal(reply.text, '### spec.md\n```markdown\n# x\n```');
+  assert.equal(reply.reasoningChars, 'Bilden visar en bur.\nRäknar stavar'.length);
+  assert.equal(reply.finishReason, 'stop');
+  assert.deepEqual(reply.usage, { input: 100, output: 50 });
+  assert.equal(seen.length, 4);
+  assert.equal(seen[1].tail, 'Räknar stavar');
+  assert.equal(seen[3].c, reply.text.length);
+});
+
+test('parseSseStream: fel-objekt i strömmen kastar', async () => {
+  await assert.rejects(() => parseSseStream(fakeSse([{ error: { message: 'överbelastad' } }])), /överbelastad/);
+});
+
+test('loopen: live-fältet skrivs medan modellen svarar och tas bort efteråt', async () => {
+  const h = harness([], [{ ok: true, output: '-> publicerad: /x' }]);
+  h.deps.liveThrottleMs = 0;
+  const snapshots: (string | undefined)[] = [];
+  h.deps.writeStatus = async (_id, s) => { snapshots.push(s.live ? s.live.content : undefined); };
+  h.deps.callModel = async (_m, onProgress) => {
+    onProgress?.({ reasoningChars: 10, contentChars: 0, reasoningTail: 'tänker', content: '' });
+    onProgress?.({ reasoningChars: 20, contentChars: 12, reasoningTail: 'skriver', content: '### spec.md\n' });
+    return { text: REPLY_BOTH, reasoningChars: 20 };
+  };
+  const s = await runBuildAgent(h.input, h.deps);
+  assert.equal(s.state, 'done');
+  assert.equal(s.live, undefined, 'live rensas när varvet är klart');
+  assert.ok(snapshots.includes(''), 'första live-skrivningen (bara tänkande)');
+  assert.ok(snapshots.includes('### spec.md\n'), 'svaret syns medan det skrivs');
+  assert.equal(snapshots[snapshots.length - 1], undefined, 'sista skrivningen utan live');
+  assert.ok(s.log.some((e) => /Tänkte 0k tecken/.test(e.msg)));
 });

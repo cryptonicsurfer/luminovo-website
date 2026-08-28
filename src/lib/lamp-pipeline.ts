@@ -41,7 +41,19 @@ export interface AgentStatus {
   updatedAt?: string;
   /** Sekunder modellen tänkt i pågående anrop (för UI:t). */
   thinkingSeconds?: number;
+  /** Strömmat under pågående modellanrop; tas bort när svaret är klart. */
+  live?: AgentLive;
 }
+export interface AgentLive {
+  reasoningChars: number;
+  contentChars: number;
+  /** Sista raden i resonemanget — visas dämpat, sparas aldrig efter varvet. */
+  reasoningTail: string;
+  /** Svarstexten så långt (spec.md + del.py medan de skrivs), max LIVE_CONTENT_MAX tecken. */
+  content: string;
+}
+export const LIVE_CONTENT_MAX = 8000;
+export const LIVE_TAIL_MAX = 240;
 const AGENT_STATES = new Set(['running', 'done', 'failed']);
 const MAX_LOG_ENTRIES = 200;
 /** En körning som inte hörts av på så länge räknas som död (låset tas över, UI:t visar "avbruten"). */
@@ -90,6 +102,18 @@ export function parseAgentStatus(raw: unknown): AgentStatus | null {
     usage,
     updatedAt: typeof a.updatedAt === 'string' ? a.updatedAt : undefined,
     thinkingSeconds: typeof a.thinkingSeconds === 'number' ? a.thinkingSeconds : undefined,
+    live: parseLive(a.live),
+  };
+}
+
+function parseLive(raw: unknown): AgentLive | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const l = raw as Record<string, unknown>;
+  return {
+    reasoningChars: typeof l.reasoningChars === 'number' ? l.reasoningChars : 0,
+    contentChars: typeof l.contentChars === 'number' ? l.contentChars : 0,
+    reasoningTail: typeof l.reasoningTail === 'string' ? l.reasoningTail.slice(-LIVE_TAIL_MAX) : '',
+    content: typeof l.content === 'string' ? l.content.slice(-LIVE_CONTENT_MAX) : '',
   };
 }
 

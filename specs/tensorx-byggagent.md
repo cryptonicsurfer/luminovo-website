@@ -80,7 +80,11 @@ får ta över — inget annat ändras.
   är kostnadsspärren. **Dev-servern binder bara 127.0.0.1** (`-H 127.0.0.1` i
   `npm run dev`) — Nexts default är 0.0.0.0, vilket hade gett alla på labbets
   wifi tillgång till båda endpoints.
-- Streaming av modellens text till sidan. Stegen räcker.
+- ~~Streaming av modellens text till sidan.~~ Byggt 2026-08-28 på Pauls begäran:
+  modellanropet strömmas (SSE); `agent.json` får ett `live`-fält (tecken tänkt,
+  sista resonemangsraden, svaret så långt — max 8k tecken) var 1,5 s medan
+  modellen skriver, och sidan visar det. `live` tas bort när varvet är klart —
+  resonemanget sparas aldrig. Pollen går på 1,5 s medan agenten kör.
 - Att göra loopen generell (andra objekt än lampskärmar). Prompten är lampspecifik.
 - Deploy. **Loopen kör kod som en språkmodell skrivit, lokalt, med dina
   rättigheter** — exakt som Claude Code i terminalen gör, men utan människa i

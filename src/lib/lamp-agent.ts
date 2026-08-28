@@ -14,7 +14,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  MODEL_FILES, STALE_RUN_MS, type AgentStatus, type AgentLogEntry, isValidId, modelDir, readModel, readModelImage,
+  MODEL_FILES, STALE_RUN_MS, LIVE_CONTENT_MAX, LIVE_TAIL_MAX,
+  type AgentStatus, type AgentLogEntry, type AgentLive, isValidId, modelDir, readModel, readModelImage,
 } from './lamp-pipeline.ts';
 
 export const MAX_ROUNDS = 3;
@@ -47,13 +48,16 @@ export { STALE_RUN_MS };
 export type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }
 
-export interface ModelReply { text: string; usage?: { input: number; output: number }; finishReason?: string }
+export interface ModelReply { text: string; usage?: { input: number; output: number }; finishReason?: string; reasoningChars?: number }
+export type OnProgress = (p: AgentLive) => void;
 export interface BuildResult { ok: boolean; output: string; previewB64?: string }
 
 export interface AgentDeps {
-  callModel(messages: ChatMessage[]): Promise<ModelReply>;
+  callModel(messages: ChatMessage[], onProgress?: OnProgress): Promise<ModelReply>;
   /** Hjärtslagsintervall under modellanrop (test sätter lågt). */
   heartbeatMs?: number;
+  /** Minsta tid mellan två live-skrivningar till agent.json (test sätter 0). */
+  liveThrottleMs?: number;
   runBuild(id: string, code: string, spec: string): Promise<BuildResult>;
   writeStatus(id: string, status: AgentStatus): Promise<void>;
   /** Valfritt: spara modellens råa svar per varv (för felsökning och för att visa på scen). */
@@ -291,16 +295,30 @@ export async function runBuildAgent(input: AgentInput, deps: AgentDeps): Promise
       status.updatedAt = now().toISOString();
       deps.writeStatus(input.id, status).catch(() => {});
     }, deps.heartbeatMs ?? HEARTBEAT_MS);
+    // Live: det modellen skriver visas på sidan medan det skrivs (strypt till var 1,5 s).
+    let lastLive = 0;
+    const onProgress: OnProgress = (p) => {
+      const t = now().getTime();
+      if (t - lastLive < (deps.liveThrottleMs ?? 1500)) return;
+      lastLive = t;
+      status.live = { ...p, reasoningTail: p.reasoningTail.slice(-LIVE_TAIL_MAX), content: p.content.slice(-LIVE_CONTENT_MAX) };
+      status.thinkingSeconds = Math.round((t - t0) / 1000);
+      status.updatedAt = now().toISOString();
+      deps.writeStatus(input.id, status).catch(() => {});
+    };
     try {
-      reply = await deps.callModel(messages);
+      reply = await deps.callModel(messages, onProgress);
     } catch (err) {
       clearInterval(beat);
+      delete status.live;
       return finish('failed', `Modellanropet misslyckades: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       clearInterval(beat);
     }
+    delete status.live;   // resonemanget sparas aldrig; svaret finns i out/agent_<id>_varv<n>.md
     status.thinkingSeconds = Math.round((now().getTime() - t0) / 1000);
     status.updatedAt = now().toISOString();
+    if (reply.reasoningChars) await log(`Tänkte ${Math.round(reply.reasoningChars / 1000)}k tecken på ${status.thinkingSeconds} s`);
     if (reply.usage && status.usage) {
       status.usage.input += reply.usage.input;
       status.usage.output += reply.usage.output;
@@ -384,39 +402,90 @@ export async function withOneRetry<T>(fn: () => Promise<T>, onRetry?: (err: unkn
 }
 
 export function tensorxCaller(env: AgentEnv): AgentDeps['callModel'] {
-  return (messages) => withOneRetry(() => tensorxOnce(env, messages), (err) => {
+  return (messages, onProgress) => withOneRetry(() => tensorxOnce(env, messages, onProgress), (err) => {
     console.warn(`[agent] TensorX: ${err instanceof Error ? err.message : err} — försöker en gång till`);
   });
 }
 
-async function tensorxOnce(env: AgentEnv, messages: ChatMessage[]): Promise<ModelReply> {
-  {
-    const res = await fetch(`${env.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${env.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: env.model, messages, max_tokens: env.maxOutputTokens, stream: false,
-        ...(env.reasoningEffort ? { reasoning_effort: env.reasoningEffort } : {}),
-      }),
-      signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      const body = (await res.text()).slice(0, 500);
-      console.error(`[agent] TensorX HTTP ${res.status}: ${body}`);
-      throw new Error(`TensorX svarade ${res.status}`);
+function textOf(v: unknown): string {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join('');
+  return '';
+}
+
+function lastLine(s: string): string {
+  const lines = s.trimEnd().split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) { const l = lines[i].trim(); if (l) return l.slice(-LIVE_TAIL_MAX); }
+  return '';
+}
+
+/** Radvis läsning av en SSE-body. */
+export async function* sseLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i: number;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      yield buf.slice(0, i).replace(/\r$/, '');
+      buf = buf.slice(i + 1);
     }
-    const json = await res.json();
-    const msg = json?.choices?.[0]?.message;
-    const content = msg?.content;
-    const text = typeof content === 'string'
-      ? content
-      : Array.isArray(content) ? content.map((p: { text?: string }) => p?.text ?? '').join('') : '';
-    // `reasoning_content` (tankekedjan) ignoreras medvetet — bara svaret används.
-    const usage = json?.usage ? { input: Number(json.usage.prompt_tokens ?? 0), output: Number(json.usage.completion_tokens ?? 0) } : undefined;
-    const finishReason = typeof json?.choices?.[0]?.finish_reason === 'string' ? json.choices[0].finish_reason : undefined;
-    console.log(`[agent] ${env.model}: ${text.length} tecken, finish=${finishReason}, tokens in/ut ${usage?.input}/${usage?.output}`);
-    return { text, usage, finishReason };
   }
+  if (buf) yield buf;
+}
+
+/**
+ * OpenAI-kompatibel SSE-ström → svar. `reasoning_content` räknas och visas som
+ * sista rad (live), men sparas aldrig; `content` är svaret. Usage kommer i
+ * sista chunken (stream_options.include_usage).
+ */
+export async function parseSseStream(lines: AsyncIterable<string>, onProgress?: OnProgress): Promise<ModelReply> {
+  let reasoning = '';
+  let content = '';
+  let finishReason: string | undefined;
+  let usage: ModelReply['usage'];
+  for await (const line of lines) {
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (data === '[DONE]') break;
+    let chunk: { error?: unknown; usage?: { prompt_tokens?: number; completion_tokens?: number }; choices?: { finish_reason?: string; delta?: { reasoning_content?: unknown; content?: unknown } }[] };
+    try { chunk = JSON.parse(data); } catch { continue; }
+    if (chunk.error) throw new Error(`TensorX: ${JSON.stringify(chunk.error).slice(0, 300)}`);
+    if (chunk.usage) usage = { input: Number(chunk.usage.prompt_tokens ?? 0), output: Number(chunk.usage.completion_tokens ?? 0) };
+    const ch = chunk.choices?.[0];
+    if (!ch) continue;
+    if (ch.finish_reason) finishReason = ch.finish_reason;
+    const r = textOf(ch.delta?.reasoning_content);
+    const c = textOf(ch.delta?.content);
+    if (r) reasoning += r;
+    if (c) content += c;
+    if ((r || c) && onProgress) onProgress({ reasoningChars: reasoning.length, contentChars: content.length, reasoningTail: lastLine(reasoning), content });
+  }
+  return { text: content, usage, finishReason, reasoningChars: reasoning.length };
+}
+
+async function tensorxOnce(env: AgentEnv, messages: ChatMessage[], onProgress?: OnProgress): Promise<ModelReply> {
+  const res = await fetch(`${env.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: env.model, messages, max_tokens: env.maxOutputTokens,
+      stream: true, stream_options: { include_usage: true },
+      ...(env.reasoningEffort ? { reasoning_effort: env.reasoningEffort } : {}),
+    }),
+    signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+  });
+  if (!res.ok || !res.body) {
+    const body = res.body ? (await res.text()).slice(0, 500) : '';
+    console.error(`[agent] TensorX HTTP ${res.status}: ${body}`);
+    throw new Error(`TensorX svarade ${res.status}`);
+  }
+  const reply = await parseSseStream(sseLines(res.body), onProgress);
+  console.log(`[agent] ${env.model}: ${reply.text.length} tecken svar, ${reply.reasoningChars} tecken tänkande, finish=${reply.finishReason}, tokens in/ut ${reply.usage?.input}/${reply.usage?.output}`);
+  return reply;
 }
 
 /** Barnprocessen får INTE ärva serverns miljö (API-nycklar). Bara det uv/python/blender behöver. */

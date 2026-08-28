@@ -23,9 +23,36 @@ interface AgentStatus {
   usage?: { input: number; output: number };
   updatedAt?: string;
   thinkingSeconds?: number;
+  live?: { reasoningChars: number; contentChars: number; reasoningTail: string; content: string };
 }
 
 const POLL_MS = 3000;
+const POLL_LIVE_MS = 1500;
+
+/** Det modellen skriver, medan det skrivs. Autoscrollar till sista raden. */
+function LiveFeed({ live }: { live: NonNullable<AgentStatus['live']> }) {
+  const ref = useRef<HTMLPreElement>(null);
+  useEffect(() => { const el = ref.current; if (el) el.scrollTop = el.scrollHeight; }, [live.contentChars]);
+  const tail = live.content.split('\n').slice(-40).join('\n');
+  return (
+    <div className="mt-3 rounded-lg bg-white/80 border border-brand-sand px-4 py-3">
+      {live.content ? (
+        <>
+          <p className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Skriver spec och kod</p>
+          <pre ref={ref} className="text-[11px] leading-snug font-mono text-gray-800 whitespace-pre-wrap max-h-64 overflow-y-auto">{tail}</pre>
+        </>
+      ) : (
+        <>
+          <p className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Tänker</p>
+          <p className="text-xs italic text-gray-600">{live.reasoningTail || 'läser bilden…'}</p>
+        </>
+      )}
+      <p className="text-[11px] text-gray-400 mt-2">
+        {Math.round(live.reasoningChars / 1000)}k tecken tänkt{live.contentChars ? ` · ${live.contentChars} tecken skrivet` : ''}
+      </p>
+    </div>
+  );
+}
 
 const MODEL_LABELS: Record<string, string> = {
   'z-ai/glm-5.3-flash': 'GLM 5.3 Flash · EU',
@@ -134,12 +161,13 @@ export default function LampDesignerHero() {
   const [isOrderFormOpen, setIsOrderFormOpen] = useState(false);
   const [isStartingAgent, setIsStartingAgent] = useState(false);
 
-  // Vid sidladdning: visa senaste designen, så att den finns kvar när man går in igen.
+  // Vid sidladdning: visa senaste designen (eller ?id=<modell> — bra på scen), så att den finns kvar när man går in igen.
   useEffect(() => {
-    fetch('/api/models', { cache: 'no-store' })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d?.models?.[0]) setCurrent(d.models[0]); })
-      .catch(() => { /* tomt läge är ett giltigt läge */ });
+    const wanted = new URLSearchParams(window.location.search).get('id');
+    const load = wanted && /^[a-z0-9-]{3,64}$/.test(wanted)
+      ? fetch(`/api/models/${wanted}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null))
+      : fetch('/api/models', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).then((d) => d?.models?.[0] ?? null);
+    load.then((m) => { if (m) setCurrent(m); }).catch(() => { /* tomt läge är ett giltigt läge */ });
   }, []);
 
   // Polla tills 3D-modellen (och specen) ligger i mappen. Terminalen skriver, sidan tittar.
@@ -153,7 +181,7 @@ export default function LampDesignerHero() {
         const m: ModelInfo = await r.json();
         setCurrent((prev) => (prev && prev.id === id && !sameState(prev, m) ? m : prev));
       } catch { /* nästa tick */ }
-    }, POLL_MS);
+    }, current.agent?.state === 'running' ? POLL_LIVE_MS : POLL_MS);
     return () => clearInterval(timer);
   }, [current]);
 
@@ -349,6 +377,7 @@ export default function LampDesignerHero() {
                       <ol className="text-xs text-gray-600 space-y-1 font-mono">
                         {current.agent.log.slice(-7).map((e, i) => <li key={i}>{e.msg}</li>)}
                       </ol>
+                      {current.agent.live && <LiveFeed live={current.agent.live} />}
                     </div>
                   ) : current.agent?.state === 'failed' ? (
                     <div className="mx-6 mb-2 rounded-xl bg-red-50 border border-red-100 px-5 py-4">
