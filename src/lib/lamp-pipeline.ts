@@ -23,7 +23,48 @@ export const MODEL_FILES = {
   preview: 'preview.png',
   spec: 'spec.md',
   source: 'del.py',
+  agent: 'agent.json',
 } as const;
+
+/** Byggagentens status (skrivs av src/lib/lamp-agent.ts). */
+export interface AgentLogEntry { t: string; msg: string }
+export interface AgentStatus {
+  state: 'running' | 'done' | 'failed';
+  step: string;
+  round: number;
+  model: string;
+  log: AgentLogEntry[];
+  startedAt: string;
+  finishedAt?: string;
+  usage?: { input: number; output: number };
+}
+const AGENT_STATES = new Set(['running', 'done', 'failed']);
+const MAX_LOG_ENTRIES = 200;
+
+/** Fail-closed: en trasig agent.json ger null, aldrig ett kastat fel. */
+export function parseAgentStatus(raw: unknown): AgentStatus | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const a = raw as Record<string, unknown>;
+  if (typeof a.state !== 'string' || !AGENT_STATES.has(a.state)) return null;
+  if (typeof a.startedAt !== 'string') return null;
+  const log = Array.isArray(a.log)
+    ? a.log.filter((e): e is AgentLogEntry => !!e && typeof e === 'object' && typeof (e as AgentLogEntry).msg === 'string' && typeof (e as AgentLogEntry).t === 'string')
+      .slice(-MAX_LOG_ENTRIES)
+    : [];
+  const usage = a.usage && typeof a.usage === 'object' && typeof (a.usage as { input?: unknown }).input === 'number' && typeof (a.usage as { output?: unknown }).output === 'number'
+    ? (a.usage as { input: number; output: number })
+    : undefined;
+  return {
+    state: a.state as AgentStatus['state'],
+    step: typeof a.step === 'string' ? a.step : '',
+    round: typeof a.round === 'number' ? a.round : 0,
+    model: typeof a.model === 'string' ? a.model : '',
+    log,
+    startedAt: a.startedAt,
+    finishedAt: typeof a.finishedAt === 'string' ? a.finishedAt : undefined,
+    usage,
+  };
+}
 
 const IMAGE_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -50,6 +91,7 @@ export interface ModelInfo {
   files: { image: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
   urls: { image: string; glb: string; usdz: string; preview: string; source: string };
   spec: string | null;
+  agent: AgentStatus | null;
 }
 
 export function isValidId(id: unknown): id is string {
@@ -163,6 +205,12 @@ export async function readModel(id: string, baseDir: string = MODELS_DIR): Promi
     source: await has(MODEL_FILES.source),
   };
   const spec = files.spec ? await fs.readFile(path.join(dir, MODEL_FILES.spec), 'utf8') : null;
+  let agent: AgentStatus | null = null;
+  try {
+    agent = parseAgentStatus(JSON.parse(await fs.readFile(path.join(dir, MODEL_FILES.agent), 'utf8')));
+  } catch {
+    agent = null;
+  }
   const base = `/models/${id}`;
   return {
     id,
@@ -176,6 +224,7 @@ export async function readModel(id: string, baseDir: string = MODELS_DIR): Promi
       source: `${base}/${MODEL_FILES.source}`,
     },
     spec,
+    agent,
   };
 }
 

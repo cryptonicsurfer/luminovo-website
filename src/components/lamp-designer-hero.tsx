@@ -10,9 +10,26 @@ interface ModelInfo {
   files: { image: boolean; glb: boolean; usdz: boolean; preview: boolean; spec: boolean; source: boolean };
   urls: { image: string; glb: string; usdz: string; preview: string; source: string };
   spec: string | null;
+  agent: AgentStatus | null;
+}
+interface AgentStatus {
+  state: 'running' | 'done' | 'failed';
+  step: string;
+  round: number;
+  model: string;
+  log: { t: string; msg: string }[];
+  startedAt: string;
+  finishedAt?: string;
+  usage?: { input: number; output: number };
 }
 
 const POLL_MS = 3000;
+
+const MODEL_LABELS: Record<string, string> = {
+  'z-ai/glm-5.3-flash': 'GLM 5.3 Flash · EU',
+  'qwen/qwen3.8-flash-next': 'Qwen3.8 Flash · EU',
+};
+const modelLabel = (id: string) => MODEL_LABELS[id] ?? id;
 
 /**
  * Minimal rendering av spec.md: rubriker, tabeller, punktlistor, stycken.
@@ -103,7 +120,8 @@ function ModelViewer({ glb, usdz }: { glb: string; usdz?: string }) {
 }
 
 function sameState(a: ModelInfo, b: ModelInfo) {
-  return a.id === b.id && a.spec === b.spec && JSON.stringify(a.files) === JSON.stringify(b.files);
+  return a.id === b.id && a.spec === b.spec && JSON.stringify(a.files) === JSON.stringify(b.files)
+    && JSON.stringify(a.agent) === JSON.stringify(b.agent);
 }
 
 export default function LampDesignerHero() {
@@ -112,6 +130,7 @@ export default function LampDesignerHero() {
   const [current, setCurrent] = useState<ModelInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isOrderFormOpen, setIsOrderFormOpen] = useState(false);
+  const [isStartingAgent, setIsStartingAgent] = useState(false);
 
   // Vid sidladdning: visa senaste designen, så att den finns kvar när man går in igen.
   useEffect(() => {
@@ -123,7 +142,7 @@ export default function LampDesignerHero() {
 
   // Polla tills 3D-modellen (och specen) ligger i mappen. Terminalen skriver, sidan tittar.
   useEffect(() => {
-    if (!current || current.files.glb) return;
+    if (!current || (current.files.glb && current.agent?.state !== 'running')) return;
     const id = current.id;
     const timer = setInterval(async () => {
       try {
@@ -155,6 +174,23 @@ export default function LampDesignerHero() {
       setError(err instanceof Error ? err.message : 'Något gick fel');
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  const handleBuildWithAgent = async () => {
+    if (!current || isStartingAgent) return;
+    setIsStartingAgent(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/models/${current.id}/build`, { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || 'Kunde inte starta byggagenten');
+      const m = await fetch(`/api/models/${current.id}`, { cache: 'no-store' });
+      if (m.ok) setCurrent(await m.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Något gick fel');
+    } finally {
+      setIsStartingAgent(false);
     }
   };
 
@@ -294,16 +330,61 @@ export default function LampDesignerHero() {
                     <div className="bg-gradient-to-b from-gray-50 to-gray-100" style={{ height: '500px' }}>
                       <ModelViewer glb={current.urls.glb} usdz={current.files.usdz ? current.urls.usdz : undefined} />
                     </div>
-                  ) : (
-                    <div className="mx-6 mb-2 rounded-xl bg-brand-sand/40 px-5 py-4 flex items-center gap-3">
-                      <span className="relative flex h-3 w-3">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-terracotta opacity-60"></span>
-                        <span className="relative inline-flex rounded-full h-3 w-3 bg-brand-terracotta"></span>
-                      </span>
-                      <span className="text-sm text-gray-700">
-                        {current.files.spec ? 'Måtten är satta. Bygger modellen…' : 'Väntar på måttspecen…'}
-                      </span>
+                  ) : current.agent?.state === 'running' ? (
+                    <div className="mx-6 mb-2 rounded-xl bg-brand-sand/40 px-5 py-4">
+                      <div className="flex items-center gap-3 mb-3">
+                        <span className="relative flex h-3 w-3">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-terracotta opacity-60"></span>
+                          <span className="relative inline-flex rounded-full h-3 w-3 bg-brand-terracotta"></span>
+                        </span>
+                        <span className="text-sm font-semibold text-brand-black">{current.agent.step}</span>
+                        <span className="text-xs text-gray-500 ml-auto">{modelLabel(current.agent.model)}{current.agent.round > 0 ? ` · varv ${current.agent.round}` : ''}</span>
+                      </div>
+                      <ol className="text-xs text-gray-600 space-y-1 font-mono">
+                        {current.agent.log.slice(-7).map((e, i) => <li key={i}>{e.msg}</li>)}
+                      </ol>
                     </div>
+                  ) : current.agent?.state === 'failed' ? (
+                    <div className="mx-6 mb-2 rounded-xl bg-red-50 border border-red-100 px-5 py-4">
+                      <p className="text-sm font-semibold text-brand-black mb-1">Byggagenten gav upp{current.agent.round ? ` efter ${current.agent.round} varv` : ''}.</p>
+                      <p className="text-xs text-gray-600 mb-3">Terminalen får ta över — eller försök igen.</p>
+                      <ol className="text-xs text-gray-600 space-y-1 font-mono mb-3">
+                        {current.agent.log.slice(-7).map((e, i) => <li key={i}>{e.msg}</li>)}
+                      </ol>
+                      <button onClick={handleBuildWithAgent} disabled={isStartingAgent} className="text-sm font-semibold text-brand-terracotta hover:underline disabled:opacity-50">
+                        Försök igen
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mx-6 mb-2 rounded-xl bg-brand-sand/40 px-5 py-4">
+                      <div className="flex items-center gap-3">
+                        <span className="relative flex h-3 w-3">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-terracotta opacity-60"></span>
+                          <span className="relative inline-flex rounded-full h-3 w-3 bg-brand-terracotta"></span>
+                        </span>
+                        <span className="text-sm text-gray-700">
+                          {current.files.spec ? 'Måtten är satta. Bygger modellen…' : 'Väntar på måttspecen…'}
+                        </span>
+                      </div>
+                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                        <button
+                          onClick={handleBuildWithAgent}
+                          disabled={isStartingAgent}
+                          className="text-white text-sm font-semibold py-2 px-5 rounded-full transition-all shadow hover:shadow-lg disabled:opacity-50"
+                          style={{ backgroundColor: 'var(--brand-terracotta)' }}
+                        >
+                          {isStartingAgent ? 'Startar…' : 'Bygg modellen i appen'}
+                        </button>
+                        <span className="text-xs text-gray-500">EU-hostad modell läser bilden, skriver koden och rättar sig själv — eller så gör terminalen det.</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {current.files.glb && current.agent?.state === 'done' && (
+                    <p className="px-6 pt-4 text-xs text-gray-500">
+                      Byggd i appen av {modelLabel(current.agent.model)} på {current.agent.round} {current.agent.round === 1 ? 'varv' : 'varv'}
+                      {current.agent.usage ? ` · ${((current.agent.usage.input + current.agent.usage.output) / 1000).toFixed(1)}k tokens` : ''}.
+                    </p>
                   )}
 
                   {current.spec && (

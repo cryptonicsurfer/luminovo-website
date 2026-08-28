@@ -1,0 +1,418 @@
+/**
+ * Byggagenten: gör i appen det Claude Code gör i terminalen.
+ *
+ *   bild → spec.md + del.py → build.py --publish → (fel? preview + utskrift tillbaka) → max 3 varv
+ *
+ * Modellen får INGA verktyg. Den svarar med text (två fenced-block) och
+ * servern kör bygget. Alla yttre beroenden (modellanrop, byggkörning,
+ * statusfil) injiceras via `AgentDeps` så loopen testas utan nät och Python.
+ *
+ * Kör kod som en språkmodell skrivit, lokalt, med dina rättigheter — precis
+ * som terminalen, men utan människa i loopen. Lokal demo, aldrig deploy.
+ */
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import {
+  MODEL_FILES, type AgentStatus, type AgentLogEntry, isValidId, modelDir, readModel, readModelImage,
+} from './lamp-pipeline.ts';
+
+export const MAX_ROUNDS = 3;
+export const DEFAULT_TENSORX_MODEL = 'z-ai/glm-5.3-flash';
+export const DEFAULT_TENSORX_BASE_URL = 'https://api.tensorx.ai/v1';
+export const BUILD_TIMEOUT_MS = 180_000;
+export const MODEL_TIMEOUT_MS = 300_000;
+/** Reasoning-tokens räknas som output hos TensorX — 16k räckte inte alltid till svaret. */
+export const MAX_OUTPUT_TOKENS = 32_000;
+export const STALE_RUN_MS = 10 * 60_000;
+
+// ---------- meddelandetyper (OpenAI-format) ----------
+export type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string | ContentPart[] }
+
+export interface ModelReply { text: string; usage?: { input: number; output: number }; finishReason?: string }
+export interface BuildResult { ok: boolean; output: string; previewB64?: string }
+
+export interface AgentDeps {
+  callModel(messages: ChatMessage[]): Promise<ModelReply>;
+  runBuild(id: string, code: string, spec: string): Promise<BuildResult>;
+  writeStatus(id: string, status: AgentStatus): Promise<void>;
+  /** Valfritt: spara modellens råa svar per varv (för felsökning och för att visa på scen). */
+  saveReply?(id: string, round: number, text: string): Promise<void>;
+  model: string;
+  now?: () => Date;
+}
+
+export interface AgentInput {
+  id: string;
+  userPrompt: string;
+  image: { base64: string; mimeType: string };
+  examples: { name: string; code: string }[];
+}
+
+// ---------- rena hjälpare ----------
+
+/** Plockar ut `### spec.md` / `### del.py` + fenced-block. Fallback: första ```python resp. ```markdown. */
+export function parseAgentReply(text: string): { spec?: string; code?: string } {
+  const afterHeading = (heading: RegExp): string | undefined => {
+    const m = heading.exec(text);
+    if (!m) return undefined;
+    const rest = text.slice(m.index + m[0].length);
+    const fence = /```[a-zA-Z]*\r?\n([\s\S]*?)\r?\n```/.exec(rest);
+    return fence ? fence[1] : undefined;
+  };
+  const byLang = (lang: RegExp): string | undefined => {
+    const m = new RegExp('```(?:' + lang.source + ')\\r?\\n([\\s\\S]*?)\\r?\\n```').exec(text);
+    return m ? m[1] : undefined;
+  };
+  const code = afterHeading(/#{1,4}\s*`?del\.py`?/i) ?? byLang(/python|py/);
+  const spec = afterHeading(/#{1,4}\s*`?spec\.md`?/i) ?? byLang(/markdown|md/);
+  return { spec: spec?.trim() ? spec.trimEnd() + '\n' : undefined, code: code?.trim() ? code.trimEnd() + '\n' : undefined };
+}
+
+/** Byter ut modellens NAMN-rad så outputfilerna heter som vi bestämt. */
+export function withForcedName(code: string, name: string): string {
+  const kept = code.split('\n').filter((l) => !/^\s*NAMN\s*=/.test(l));
+  return kept.join('\n').trimEnd() + `\n\nNAMN = "${name}"\n`;
+}
+
+export function agentPartName(id: string): string {
+  return `agent_${id}`;
+}
+
+const CHEAT_SHEET = `
+KONVENTIONER (samma som build123d-tests/CLAUDE.md):
+- Enhet millimeter. Origin i bottencentrum, +Z uppåt. Delen ska stå printbart som den är.
+- ALLA mått som namngivna konstanter högst upp, varje med kommentar "# spec rad N".
+- Filen definierar \`part\` (build123d-objektet). Sätt INTE NAMN — det gör servern.
+- Fillets via fillet(), aldrig manuellt modellerad rundning.
+- Printkonstanter: bädd 250 × 210 × 220 mm (Z ≤ 220!), minsta vägg 0.8 mm, inga stöd.
+  Lampskärm: max 40 cm hög (i praktiken ≤ 210 pga bädden), E27-hål 40.5 mm centrerat i bottenplattan.
+- Bara den printade delen: ingen glödlampa, ingen frostad innerskärm, ingen möbel.
+
+BUILD123D-LATHUND (0.11):
+  from build123d import *
+  with BuildPart() as b:
+      Cylinder(radie, hojd, align=(Align.CENTER, Align.CENTER, Align.MIN))   # står på Z=0
+      Box(x, y, z, align=(Align.CENTER, Align.CENTER, Align.MIN))
+      Hole(radius=r)                                    # genomgående hål i Z genom senaste solid
+      with BuildSketch(Plane.XY.offset(z)):             # skiss på höjd z
+          Circle(r); Circle(r2, mode=Mode.SUBTRACT)     # ring
+          with PolarLocations(radie, antal): Circle(r)  # cirkel av punkter
+      extrude(amount=h)
+      fillet(b.edges().group_by(Axis.Z)[-1], radius=r)  # översta kanterna
+      with PolarLocations(0, antal): add(solid)         # roterade kopior av en färdig solid
+  solid = Cylinder(r, L, align=(..., Align.MIN)).rotate(Axis.Y, grader).moved(Location((x, y, z)))
+  part = b.part
+  Undvik: loft med flera profiler per skiss, sweep längs komplexa banor, text, gängor. Håll geometrin
+  rotationssymmetrisk och hårdytad — det är där bygget lyckas.
+  p.is_valid är en property, inte metod.
+
+SVARSFORMAT — exakt så här, inget annat:
+### spec.md
+\`\`\`markdown
+# Kravspec — <namn>
+| Rad | Mått | Värde | Kommentar |
+|---|---|---|---|
+| 1 | ... | ... | ... |
+## Antaganden
+- ...
+\`\`\`
+### del.py
+\`\`\`python
+"""<en rad om delen>"""
+from build123d import *
+# --- MATT (mm) ---
+...
+part = b.part
+\`\`\`
+`;
+
+export function buildSystemPrompt(examples: { name: string; code: string }[]): string {
+  const ex = examples.map((e) => `--- ${e.name} ---\n${e.code.trim()}`).join('\n\n');
+  return (
+    'Du är en CAD-ingenjör som skriver parametriska, 3D-printbara delar i build123d (Python). ' +
+    'Du får en bild av en bordslampskärm och ska (1) läsa av dess form och uppskatta måtten, ' +
+    '(2) skriva en kravspec med numrerade rader, (3) skriva en build123d-fil där varje konstant pekar på en spec-rad. ' +
+    'Servern bygger, validerar och renderar delen och skickar tillbaka utskriften och en rendering. ' +
+    'Får du ett fel eller en rendering som inte stämmer med bilden: rätta och svara igen i samma format. ' +
+    'Var konkret och kort. Ingen prosa utanför blocken.\n' +
+    CHEAT_SHEET +
+    (ex ? `\nEXEMPEL PÅ FÄRDIGA DELAR I SAMMA STIL:\n\n${ex}\n` : '')
+  );
+}
+
+export function buildFirstMessage(input: AgentInput): ChatMessage {
+  return {
+    role: 'user',
+    content: [
+      {
+        type: 'text',
+        text:
+          `Referensbild på lampskärmen. Kundens önskan: "${input.userPrompt}". ` +
+          'Skriv spec.md och del.py enligt formatet. Uppskatta proportionerna ur bilden; ' +
+          'total höjd ≤ 210 mm, bredd ≤ 200 mm. Ange antalet spjälor/element genom att räkna i bilden.',
+      },
+      { type: 'image_url', image_url: { url: `data:${input.image.mimeType};base64,${input.image.base64}` } },
+    ],
+  };
+}
+
+export function buildFeedbackMessage(result: BuildResult, round: number): ChatMessage {
+  const parts: ContentPart[] = [
+    {
+      type: 'text',
+      text:
+        `Varv ${round}: bygget ${result.ok ? 'gick igenom' : 'MISSLYCKADES'}. Utskrift:\n\`\`\`\n${result.output.trim()}\n\`\`\`\n` +
+        (result.previewB64
+          ? 'Här är renderingen (FRAMIFRÅN, SIDA, PERSPEKTIV). Jämför med referensbilden. '
+          : 'Ingen rendering kunde göras (koden kraschade innan bygget). ') +
+        'Rätta felet och svara med ### del.py (och ### spec.md om måtten ändras).',
+    },
+  ];
+  if (result.previewB64) parts.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${result.previewB64}` } });
+  return { role: 'user', content: parts };
+}
+
+/** Radar ur build.py-utskriften som är värda att visa på sidan. */
+export function summarizeBuildOutput(output: string): string[] {
+  return output
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^(matt|volym|genus|trianglar|vattentat|VARNING|FEL|Traceback|\w*Error)/.test(l))
+    .slice(0, 8);
+}
+
+// ---------- loopen ----------
+
+export async function runBuildAgent(input: AgentInput, deps: AgentDeps): Promise<AgentStatus> {
+  const now = deps.now ?? (() => new Date());
+  const status: AgentStatus = {
+    state: 'running', step: 'läser bilden', round: 0, model: deps.model, log: [], startedAt: now().toISOString(),
+    usage: { input: 0, output: 0 },
+  };
+  const log = async (msg: string, step?: string) => {
+    if (step) status.step = step;
+    status.log.push({ t: now().toISOString(), msg } satisfies AgentLogEntry);
+    await deps.writeStatus(input.id, status);
+  };
+  const finish = async (state: 'done' | 'failed', msg: string) => {
+    status.state = state;
+    status.finishedAt = now().toISOString();
+    await log(msg, state === 'done' ? 'klar' : 'gav upp');
+    return status;
+  };
+
+  await log(`Läser bilden med ${deps.model}`, 'läser bilden');
+  const messages: ChatMessage[] = [
+    { role: 'system', content: buildSystemPrompt(input.examples) },
+    buildFirstMessage(input),
+  ];
+  let spec: string | undefined;
+
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    status.round = round;
+    await log(round === 1 ? 'Skriver måttspec och build123d-kod' : `Rättar (varv ${round} av ${MAX_ROUNDS})`, round === 1 ? 'skriver kod' : 'rättar');
+
+    let reply: ModelReply;
+    try {
+      reply = await deps.callModel(messages);
+    } catch (err) {
+      return finish('failed', `Modellanropet misslyckades: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (reply.usage && status.usage) {
+      status.usage.input += reply.usage.input;
+      status.usage.output += reply.usage.output;
+    }
+    await deps.saveReply?.(input.id, round, reply.text).catch(() => {});
+    if (reply.finishReason === 'length') await log('Svaret kapades av max_tokens');
+    messages.push({ role: 'assistant', content: reply.text });
+
+    const parsed = parseAgentReply(reply.text);
+    if (parsed.spec) spec = parsed.spec;
+    if (!parsed.code) {
+      await log('Svaret saknade ett ```python-block');
+      messages.push({ role: 'user', content: 'Jag hittade inget ```python-block. Svara med "### del.py" följt av ett fenced python-block (och "### spec.md" med markdown-block).' });
+      continue;
+    }
+    if (!spec) spec = `# Kravspec — ${input.id}\n\n(modellen lämnade ingen spec)\n`;
+
+    await log('Bygger, validerar och renderar', 'bygger');
+    let result: BuildResult;
+    try {
+      result = await deps.runBuild(input.id, withForcedName(parsed.code, agentPartName(input.id)), spec);
+    } catch (err) {
+      result = { ok: false, output: `Byggkörningen kraschade: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    for (const line of summarizeBuildOutput(result.output)) await log(line);
+
+    if (result.ok) {
+      return finish('done', `Modellen publicerad efter ${round} ${round === 1 ? 'varv' : 'varv'}`);
+    }
+    if (round < MAX_ROUNDS) messages.push(buildFeedbackMessage(result, round));
+  }
+  return finish('failed', `Gav upp efter ${MAX_ROUNDS} varv — terminalen får ta över`);
+}
+
+// ---------- riktiga beroenden ----------
+
+export interface AgentEnv {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  build123dDir: string;
+}
+
+export function readAgentEnv(env: NodeJS.ProcessEnv = process.env): AgentEnv | null {
+  const apiKey = env.TENSORX_API_KEY;
+  if (!apiKey) return null;
+  return {
+    apiKey,
+    baseUrl: (env.TENSORX_BASE_URL ?? DEFAULT_TENSORX_BASE_URL).replace(/\/$/, ''),
+    model: env.TENSORX_MODEL ?? DEFAULT_TENSORX_MODEL,
+    build123dDir: path.resolve(process.cwd(), env.BUILD123D_DIR ?? '../build123d-tests'),
+  };
+}
+
+export function tensorxCaller(env: AgentEnv): AgentDeps['callModel'] {
+  return async (messages) => {
+    const res = await fetch(`${env.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: env.model, messages, max_tokens: MAX_OUTPUT_TOKENS, stream: false }),
+      signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 500);
+      console.error(`[agent] TensorX HTTP ${res.status}: ${body}`);
+      throw new Error(`TensorX svarade ${res.status}`);
+    }
+    const json = await res.json();
+    const msg = json?.choices?.[0]?.message;
+    const content = msg?.content;
+    const text = typeof content === 'string'
+      ? content
+      : Array.isArray(content) ? content.map((p: { text?: string }) => p?.text ?? '').join('') : '';
+    // `reasoning_content` (tankekedjan) ignoreras medvetet — bara svaret används.
+    const usage = json?.usage ? { input: Number(json.usage.prompt_tokens ?? 0), output: Number(json.usage.completion_tokens ?? 0) } : undefined;
+    const finishReason = typeof json?.choices?.[0]?.finish_reason === 'string' ? json.choices[0].finish_reason : undefined;
+    console.log(`[agent] ${env.model}: ${text.length} tecken, finish=${finishReason}, tokens in/ut ${usage?.input}/${usage?.output}`);
+    return { text, usage, finishReason };
+  };
+}
+
+function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number | null; out: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd, env: process.env });
+    let out = '';
+    const push = (chunk: Buffer) => { out += chunk.toString(); if (out.length > 200_000) out = out.slice(-200_000); };
+    child.stdout.on('data', push);
+    child.stderr.on('data', push);
+    const timer = setTimeout(() => { child.kill('SIGKILL'); out += `\n[timeout efter ${timeoutMs / 1000} s]`; }, timeoutMs);
+    child.on('error', (err) => { clearTimeout(timer); resolve({ code: null, out: out + `\n${err.message}` }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out }); });
+  });
+}
+
+export function localBuildRunner(env: AgentEnv): AgentDeps['runBuild'] {
+  return async (id, code, spec) => {
+    if (!isValidId(id)) throw new Error('ogiltigt id');
+    const name = agentPartName(id);
+    const partsRel = path.join('parts', `${name}.py`);
+    const specRel = path.join('ref', `${name}_spec.md`);
+    const outDir = modelDir(id);
+    if (!outDir) throw new Error('ogiltigt id');
+    await fs.mkdir(path.join(env.build123dDir, 'parts'), { recursive: true });
+    await fs.mkdir(path.join(env.build123dDir, 'ref'), { recursive: true });
+    await fs.writeFile(path.join(env.build123dDir, partsRel), code);
+    await fs.writeFile(path.join(env.build123dDir, specRel), spec);
+
+    const previewPath = path.join(env.build123dDir, 'out', `${name}_preview.png`);
+    await fs.rm(previewPath, { force: true });
+
+    const { code: exit, out } = await run(
+      'uv', ['run', 'python', 'tools/build.py', partsRel, '--publish', outDir, '--spec', specRel],
+      env.build123dDir, BUILD_TIMEOUT_MS,
+    );
+    let previewB64: string | undefined;
+    try { previewB64 = (await fs.readFile(previewPath)).toString('base64'); } catch { /* ingen rendering */ }
+    const ok = exit === 0 && /publicerad:/.test(out);
+    return { ok, output: out.slice(-4000), previewB64 };
+  };
+}
+
+/** Modellens råa svar → build123d-tests/out/agent_<id>_varv<n>.md */
+export function replySaver(env: AgentEnv): NonNullable<AgentDeps['saveReply']> {
+  return async (id, round, text) => {
+    if (!isValidId(id)) return;
+    const outDir = path.join(env.build123dDir, 'out');
+    await fs.mkdir(outDir, { recursive: true });
+    await fs.writeFile(path.join(outDir, `${agentPartName(id)}_varv${round}.md`), text);
+  };
+}
+
+export async function writeAgentStatus(id: string, status: AgentStatus): Promise<void> {
+  const dir = modelDir(id);
+  if (!dir) throw new Error('ogiltigt id');
+  const tmp = path.join(dir, `${MODEL_FILES.agent}.tmp`);
+  await fs.writeFile(tmp, JSON.stringify(status, null, 2));
+  await fs.rename(tmp, path.join(dir, MODEL_FILES.agent));
+}
+
+async function readExamples(build123dDir: string): Promise<{ name: string; code: string }[]> {
+  const out: { name: string; code: string }[] = [];
+  for (const name of ['demo_konsol.py', 'lampa_konisk.py']) {
+    try { out.push({ name, code: await fs.readFile(path.join(build123dDir, 'parts', name), 'utf8') }); } catch { /* valfritt */ }
+  }
+  return out;
+}
+
+/**
+ * Lås per modell: `agent.lock` skapas exklusivt. Ett lås äldre än STALE_RUN_MS
+ * räknas som kvarlämnat (kraschad process) och tas över.
+ */
+export async function acquireLock(id: string): Promise<boolean> {
+  const dir = modelDir(id);
+  if (!dir) return false;
+  const lock = path.join(dir, 'agent.lock');
+  try {
+    await fs.writeFile(lock, new Date().toISOString(), { flag: 'wx' });
+    return true;
+  } catch {
+    try {
+      const st = await fs.stat(lock);
+      if (Date.now() - st.mtimeMs > STALE_RUN_MS) {
+        await fs.writeFile(lock, new Date().toISOString());
+        return true;
+      }
+    } catch { /* fallthrough */ }
+    return false;
+  }
+}
+
+export async function releaseLock(id: string): Promise<void> {
+  const dir = modelDir(id);
+  if (dir) await fs.rm(path.join(dir, 'agent.lock'), { force: true });
+}
+
+/** Hela kedjan för ett id med riktiga beroenden. Anropas efter att låset tagits. */
+export async function runRealAgent(id: string, env: AgentEnv): Promise<void> {
+  try {
+    const model = await readModel(id);
+    const image = await readModelImage(id);
+    if (!model || !image) throw new Error('modellen eller bilden saknas');
+    await runBuildAgent(
+      { id, userPrompt: model.meta.userPrompt, image, examples: await readExamples(env.build123dDir) },
+      { callModel: tensorxCaller(env), runBuild: localBuildRunner(env), writeStatus: writeAgentStatus, saveReply: replySaver(env), model: env.model },
+    );
+  } catch (err) {
+    console.error('[agent] fel:', err);
+    await writeAgentStatus(id, {
+      state: 'failed', step: 'gav upp', round: 0, model: env.model,
+      log: [{ t: new Date().toISOString(), msg: `Oväntat fel: ${err instanceof Error ? err.message : String(err)}` }],
+      startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    }).catch(() => {});
+  } finally {
+    await releaseLock(id);
+  }
+}

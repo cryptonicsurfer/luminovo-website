@@ -16,7 +16,14 @@
 >    (GLB, AR via USDZ) så fort `modell.glb` finns. Vid omladdning visas
 >    senaste modellen.
 >
-> Nyckel: `FAL_API_KEY` i `.env.local` (se `.env.example`). Spec:
+> **Eller i appen:** knappen "Bygg modellen i appen" startar `POST /api/models/<id>/build`
+> — en EU-hostad modell via TensorX (default `z-ai/glm-5.3-flash`) läser bilden, skriver
+> spec + build123d-kod, servern kör `build.py`, och fel + rendering går tillbaka till
+> modellen i upp till tre varv. Status i `public/models/<id>/agent.json`. Loopen kör kod
+> som en språkmodell skrivit, lokalt — det är avsikten, och skälet till att detta aldrig
+> deployas. Spec: `specs/tensorx-byggagent.md`.
+>
+> Nycklar: `FAL_API_KEY`, `TENSORX_API_KEY` i `.env.local` (se `.env.example`). Spec:
 > `specs/fal-och-terminalbyggd-3d.md`. Tester: `npm test`.
 
 
