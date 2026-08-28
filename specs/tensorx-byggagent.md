@@ -56,7 +56,14 @@ får ta över — inget annat ändras.
      (python + blender, inte bara uv). Lyckat = exit 0 **och** `modell.glb` har
      mtime efter körningens start — inte en textsträng modellens kod kan trycka.
 - TensorX via `fetch` mot `${TENSORX_BASE_URL}/chat/completions` (OpenAI-format,
-  `stream: false`, bild som `image_url`-data-URI, `max_tokens` 32000 — reasoning-tokens räknas som output, 16k kapade första svaret i test 1 — timeout 300 s).
+  `stream: false`, bild som `image_url`-data-URI). **`max_tokens` = modellens
+  kontext − 64k** (glm-5.3-flash 984k, qwen3.8-flash-next 198k; override
+  `TENSORX_MAX_OUTPUT_TOKENS`). Princip: reasoning-modeller är verbosa by default
+  och reasoning bills som output — 16k och 32k kapade riktiga svar; appen byggs
+  runt att ett anrop kan tänka länge: timeout 45 min, hjärtslag (`updatedAt`,
+  `thinkingSeconds`) i `agent.json` var 30:e s så låset lever och UI:t visar
+  "tänker sedan N min". Kostnadstak per anrop = max_tokens × $0.50/M ≈ 5 kr
+  i värsta fall för glm; typiskt 5–50 öre.
   `reasoning_content` i svaret ignoreras. Ingen `enable_thinking: false`
   (knowledge-worker: det flyttar tankekedjan in i `content`).
 - Env: `TENSORX_API_KEY`, `TENSORX_BASE_URL` (default `https://api.tensorx.ai/v1`),

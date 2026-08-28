@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAgentReply, withForcedName, runBuildAgent, summarizeBuildOutput, buildSystemPrompt, MAX_ROUNDS,
-  checkCodeSafety, childEnv, buildSucceeded, solidityProblem, withOneRetry,
+  checkCodeSafety, childEnv, buildSucceeded, solidityProblem, withOneRetry, maxOutputTokens,
   type AgentDeps, type AgentInput, type ChatMessage, type BuildResult,
 } from '../src/lib/lamp-agent.ts';
 import { parseAgentStatus, markStale, STALE_RUN_MS } from '../src/lib/lamp-pipeline.ts';
@@ -280,4 +280,25 @@ test('withOneRetry: en gång till vid timeout/5xx, inte vid annat', async () => 
   const auth = async () => { n++; throw new Error('TensorX svarade 401'); };
   await assert.rejects(() => withOneRetry(auth), /401/);
   assert.equal(n, 1, 'inget omförsök på 401');
+});
+
+test('maxOutputTokens: kontext minus headroom, env-override vinner', () => {
+  assert.equal(maxOutputTokens('z-ai/glm-5.3-flash'), 1_048_576 - 64_000);
+  assert.equal(maxOutputTokens('qwen/qwen3.8-flash-next'), 262_144 - 64_000);
+  assert.equal(maxOutputTokens('okänd/modell'), 262_144 - 64_000);
+  assert.equal(maxOutputTokens('z-ai/glm-5.3-flash', '50000'), 50_000);
+  assert.equal(maxOutputTokens('z-ai/glm-5.3-flash', 'skräp'), 1_048_576 - 64_000);
+});
+
+test('hjärtslag under modellanropet håller statusen levande', async () => {
+  const h = harness([REPLY_BOTH], [{ ok: true, output: '-> publicerad: /x' }]);
+  const beats: number[] = [];
+  h.deps.heartbeatMs = 20;
+  h.deps.writeStatus = async (_id, s) => { if (s.thinkingSeconds !== undefined && s.updatedAt) beats.push(s.thinkingSeconds); };
+  const orig = h.deps.callModel;
+  h.deps.callModel = async (m) => { await new Promise((r) => setTimeout(r, 120)); return orig(m); };
+  const s = await runBuildAgent(h.input, h.deps);
+  assert.equal(s.state, 'done');
+  assert.ok(beats.length >= 3, `förväntade minst 3 hjärtslag, fick ${beats.length}`);
+  assert.ok(s.updatedAt);
 });

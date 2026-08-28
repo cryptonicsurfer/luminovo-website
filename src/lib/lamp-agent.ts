@@ -21,9 +21,26 @@ export const MAX_ROUNDS = 3;
 export const DEFAULT_TENSORX_MODEL = 'z-ai/glm-5.3-flash';
 export const DEFAULT_TENSORX_BASE_URL = 'https://api.tensorx.ai/v1';
 export const BUILD_TIMEOUT_MS = 180_000;
-export const MODEL_TIMEOUT_MS = 300_000;
-/** Reasoning-tokens räknas som output hos TensorX — 16k räckte inte alltid till svaret. */
-export const MAX_OUTPUT_TOKENS = 32_000;
+/**
+ * Reasoning-modeller är verbosa by default och reasoning räknas som output.
+ * Princip (Paul 2026-08-28): kör alltid det max modellen tillåter och bygg
+ * appen runt det. TensorX klipper inte max_tokens (2M accepteras tyst), så
+ * taket är kontextfönstret; vi lämnar 64k till prompten. Ett långt anrop kan
+ * ta 20+ min → generös timeout + hjärtslag i statusfilen.
+ */
+export const MODEL_TIMEOUT_MS = 45 * 60_000;
+export const PROMPT_HEADROOM_TOKENS = 64_000;
+export const MODEL_CONTEXT: Record<string, number> = {
+  'z-ai/glm-5.3-flash': 1_048_576,
+  'qwen/qwen3.8-flash-next': 262_144,
+};
+export const DEFAULT_CONTEXT = 262_144;
+export function maxOutputTokens(model: string, override?: string): number {
+  const o = Number(override);
+  if (override && Number.isFinite(o) && o > 0) return Math.floor(o);
+  return (MODEL_CONTEXT[model] ?? DEFAULT_CONTEXT) - PROMPT_HEADROOM_TOKENS;
+}
+export const HEARTBEAT_MS = 30_000;
 export { STALE_RUN_MS };
 
 // ---------- meddelandetyper (OpenAI-format) ----------
@@ -35,6 +52,8 @@ export interface BuildResult { ok: boolean; output: string; previewB64?: string 
 
 export interface AgentDeps {
   callModel(messages: ChatMessage[]): Promise<ModelReply>;
+  /** Hjärtslagsintervall under modellanrop (test sätter lågt). */
+  heartbeatMs?: number;
   runBuild(id: string, code: string, spec: string): Promise<BuildResult>;
   writeStatus(id: string, status: AgentStatus): Promise<void>;
   /** Valfritt: spara modellens råa svar per varv (för felsökning och för att visa på scen). */
@@ -243,6 +262,7 @@ export async function runBuildAgent(input: AgentInput, deps: AgentDeps): Promise
   const log = async (msg: string, step?: string) => {
     if (step) status.step = step;
     status.log.push({ t: now().toISOString(), msg } satisfies AgentLogEntry);
+    status.updatedAt = now().toISOString();
     await deps.writeStatus(input.id, status);
   };
   const finish = async (state: 'done' | 'failed', msg: string) => {
@@ -264,17 +284,29 @@ export async function runBuildAgent(input: AgentInput, deps: AgentDeps): Promise
     await log(round === 1 ? 'Skriver måttspec och build123d-kod' : `Rättar (varv ${round} av ${MAX_ROUNDS})`, round === 1 ? 'skriver kod' : 'rättar');
 
     let reply: ModelReply;
+    const t0 = now().getTime();
+    status.thinkingSeconds = 0;
+    const beat = setInterval(() => {
+      status.thinkingSeconds = Math.round((now().getTime() - t0) / 1000);
+      status.updatedAt = now().toISOString();
+      deps.writeStatus(input.id, status).catch(() => {});
+    }, deps.heartbeatMs ?? HEARTBEAT_MS);
     try {
       reply = await deps.callModel(messages);
     } catch (err) {
+      clearInterval(beat);
       return finish('failed', `Modellanropet misslyckades: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      clearInterval(beat);
     }
+    status.thinkingSeconds = Math.round((now().getTime() - t0) / 1000);
+    status.updatedAt = now().toISOString();
     if (reply.usage && status.usage) {
       status.usage.input += reply.usage.input;
       status.usage.output += reply.usage.output;
     }
     await deps.saveReply?.(input.id, round, reply.text).catch(() => {});
-    if (reply.finishReason === 'length') await log('Svaret kapades av max_tokens');
+    if (reply.finishReason === 'length') await log(`Svaret kapades av max_tokens (${reply.usage?.output ?? '?'} tokens)`);
     messages.push({ role: 'assistant', content: reply.text });
 
     const parsed = parseAgentReply(reply.text);
@@ -320,6 +352,9 @@ export interface AgentEnv {
   baseUrl: string;
   model: string;
   build123dDir: string;
+  maxOutputTokens: number;
+  /** Valfri `reasoning_effort` (low/medium/high). Enda säkra ratten för att korta tänkandet — aldrig enable_thinking:false. */
+  reasoningEffort?: string;
 }
 
 export function readAgentEnv(env: NodeJS.ProcessEnv = process.env): AgentEnv | null {
@@ -330,6 +365,8 @@ export function readAgentEnv(env: NodeJS.ProcessEnv = process.env): AgentEnv | n
     baseUrl: (env.TENSORX_BASE_URL ?? DEFAULT_TENSORX_BASE_URL).replace(/\/$/, ''),
     model: env.TENSORX_MODEL ?? DEFAULT_TENSORX_MODEL,
     build123dDir: path.resolve(process.cwd(), env.BUILD123D_DIR ?? '../build123d-tests'),
+    maxOutputTokens: maxOutputTokens(env.TENSORX_MODEL ?? DEFAULT_TENSORX_MODEL, env.TENSORX_MAX_OUTPUT_TOKENS),
+    reasoningEffort: env.TENSORX_REASONING_EFFORT || undefined,
   };
 }
 
@@ -357,7 +394,10 @@ async function tensorxOnce(env: AgentEnv, messages: ChatMessage[]): Promise<Mode
     const res = await fetch(`${env.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: env.model, messages, max_tokens: MAX_OUTPUT_TOKENS, stream: false }),
+      body: JSON.stringify({
+        model: env.model, messages, max_tokens: env.maxOutputTokens, stream: false,
+        ...(env.reasoningEffort ? { reasoning_effort: env.reasoningEffort } : {}),
+      }),
       signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
     });
     if (!res.ok) {

@@ -21,6 +21,8 @@ interface AgentStatus {
   startedAt: string;
   finishedAt?: string;
   usage?: { input: number; output: number };
+  updatedAt?: string;
+  thinkingSeconds?: number;
 }
 
 const POLL_MS = 3000;
@@ -338,7 +340,11 @@ export default function LampDesignerHero() {
                           <span className="relative inline-flex rounded-full h-3 w-3 bg-brand-terracotta"></span>
                         </span>
                         <span className="text-sm font-semibold text-brand-black">{current.agent.step}</span>
-                        <span className="text-xs text-gray-500 ml-auto">{modelLabel(current.agent.model)}{current.agent.round > 0 ? ` · varv ${current.agent.round}` : ''}</span>
+                        <span className="text-xs text-gray-500 ml-auto">
+                          {modelLabel(current.agent.model)}{current.agent.round > 0 ? ` · varv ${current.agent.round}` : ''}
+                          {(current.agent.step === 'skriver kod' || current.agent.step === 'rättar') && (current.agent.thinkingSeconds ?? 0) >= 60
+                            ? ` · tänker sedan ${Math.floor((current.agent.thinkingSeconds ?? 0) / 60)} min` : ''}
+                        </span>
                       </div>
                       <ol className="text-xs text-gray-600 space-y-1 font-mono">
                         {current.agent.log.slice(-7).map((e, i) => <li key={i}>{e.msg}</li>)}

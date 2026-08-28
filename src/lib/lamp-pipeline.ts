@@ -37,17 +37,22 @@ export interface AgentStatus {
   startedAt: string;
   finishedAt?: string;
   usage?: { input: number; output: number };
+  /** Hjärtslag: skrivs var 30:e s medan modellen tänker, så en lång körning inte döms ut som död. */
+  updatedAt?: string;
+  /** Sekunder modellen tänkt i pågående anrop (för UI:t). */
+  thinkingSeconds?: number;
 }
 const AGENT_STATES = new Set(['running', 'done', 'failed']);
 const MAX_LOG_ENTRIES = 200;
 /** En körning som inte hörts av på så länge räknas som död (låset tas över, UI:t visar "avbruten"). */
 export const STALE_RUN_MS = 10 * 60_000;
 
-/** Senaste livstecken: sista loggraden, annars starttiden. */
+/** Senaste livstecken: hjärtslaget, annars sista loggraden, annars starttiden. */
 export function lastActivityMs(a: AgentStatus): number {
-  const last = a.log.length ? a.log[a.log.length - 1].t : a.startedAt;
-  const t = Date.parse(last);
-  return Number.isFinite(t) ? t : Date.parse(a.startedAt) || 0;
+  const candidates = [a.updatedAt, a.log.length ? a.log[a.log.length - 1].t : undefined, a.startedAt]
+    .map((s) => (s ? Date.parse(s) : NaN))
+    .filter((t) => Number.isFinite(t));
+  return candidates.length ? Math.max(...candidates) : 0;
 }
 
 /** running utan livstecken på STALE_RUN_MS → failed, så sidan får en "försök igen"-knapp i stället för evig spinner. */
@@ -83,6 +88,8 @@ export function parseAgentStatus(raw: unknown): AgentStatus | null {
     startedAt: a.startedAt,
     finishedAt: typeof a.finishedAt === 'string' ? a.finishedAt : undefined,
     usage,
+    updatedAt: typeof a.updatedAt === 'string' ? a.updatedAt : undefined,
+    thinkingSeconds: typeof a.thinkingSeconds === 'number' ? a.thinkingSeconds : undefined,
   };
 }
 
