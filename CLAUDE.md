@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Luminovo Website - A modern Next.js 15 website for a Swedish luxury lamp boutique featuring AI-designed lighting products. Built with TypeScript, Tailwind CSS v4, and React 19.
 
+**Fork för AI-labbet (2026-08):** bildgenerering via **fal.ai** (`src/lib/lamp-pipeline.ts`,
+`/api/generate-lampshade`), 3D-modellen byggs av Claude Code i terminalen i
+`../build123d-tests` och publiceras till `public/models/<id>/` med
+`tools/build.py --publish`. Sajten pollar `/api/models/<id>` och visar
+`<model-viewer>`. Meshy och Gemini-bildkedjan är borttagna; Gemini finns kvar
+bara i `/api/estimate-price`. Lokal demo — inte Vercel-deploybar. Läs README
+och `specs/fal-och-terminalbyggd-3d.md` innan du ändrar flödet.
+
 ## Development Commands
 
 ```bash

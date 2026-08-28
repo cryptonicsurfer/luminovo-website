@@ -1,5 +1,25 @@
 # Luminovo Website
 
+> **Demo-läge för AI-labbet (2026-08).** Den här forken byter Gemini + Meshy mot
+> **fal.ai** (bild) + **Claude Code i terminalen** (3D-modell med riktiga mått).
+> Det är en **lokal demo-arkitektur**: servern skriver genererade bilder till
+> `public/models/<id>/` i runtime, vilket inte fungerar på Vercel. Kör med
+> `npm run dev`.
+>
+> **Flödet på scen**
+> 1. Skriv en lampidé på sajten → `POST /api/generate-lampshade` → fal.ai
+>    (Seedream v5 lite) → `public/models/<id>/bild.jpg` + `meta.json`.
+> 2. I terminalen, i `../build123d-tests`: Claude Code läser bilden, skriver en
+>    måttspec och en build123d-del, och kör
+>    `uv run python tools/build.py parts/<del>.py --publish ../luminovo-website/public/models/<id> --spec ref/<spec>.md`
+> 3. Sajten pollar `/api/models/<id>` var 3:e sekund och visar `<model-viewer>`
+>    (GLB, AR via USDZ) så fort `modell.glb` finns. Vid omladdning visas
+>    senaste modellen.
+>
+> Nyckel: `FAL_API_KEY` i `.env.local` (se `.env.example`). Spec:
+> `specs/fal-och-terminalbyggd-3d.md`. Tester: `npm test`.
+
+
 A modern, responsive website for Luminovo - an AI-powered design studio that creates custom lighting in minutes. Built with Next.js 15, TypeScript, Tailwind CSS v4, and shadcn/ui components.
 
 ## 🌟 Features
