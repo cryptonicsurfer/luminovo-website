@@ -474,6 +474,13 @@ export async function parseSseStream(lines: AsyncIterable<string>, onProgress?: 
   return { text: content, usage, finishReason, reasoningChars: reasoning.length };
 }
 
+/**
+ * STREAMING ÄR INTE VALFRITT. Nodes fetch (undici) har en body-timeout på 300 s
+ * som nollställs per mottagen chunk. Ett icke-strömmat svar från en reasoning-
+ * modell som tänker > 5 min dör med "fetch failed" — sett i skarp körning
+ * (2 × 300 s = 600 s med omförsöket). Med stream:true droppar chunkar in hela
+ * tiden och timern når aldrig 300 s.
+ */
 async function tensorxOnce(env: AgentEnv, messages: ChatMessage[], onProgress?: OnProgress): Promise<ModelReply> {
   const res = await fetch(`${env.baseUrl}/chat/completions`, {
     method: 'POST',

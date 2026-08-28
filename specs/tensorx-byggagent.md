@@ -95,6 +95,9 @@ i produktfotot har lurat agenten till massiva kroppar.
   sista resonemangsraden, svaret så långt — max 8k tecken) var 1,5 s medan
   modellen skriver, och sidan visar det. `live` tas bort när varvet är klart —
   resonemanget sparas aldrig. Pollen går på 1,5 s medan agenten kör.
+  **Streaming är dessutom nödvändig**: Nodes `fetch` (undici) har en 300 s
+  body-timeout som nollställs per chunk; ett icke-strömmat svar som tar > 5 min
+  dör med `fetch failed` (sett: 2 × 300 s = 600 s med omförsöket).
 - Att göra loopen generell (andra objekt än lampskärmar). Prompten är lampspecifik.
 - Deploy. **Loopen kör kod som en språkmodell skrivit, lokalt, med dina
   rättigheter** — exakt som Claude Code i terminalen gör, men utan människa i
