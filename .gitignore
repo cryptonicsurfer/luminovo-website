@@ -42,3 +42,8 @@ next-env.d.ts
 
 # mcp server configuration (per-developer)
 .mcp.json
+
+# genererade lampor (bild + 3D-modell) — demo-output, inte källa
+/public/models/*
+!/public/models/.gitkeep
+!.env.example
