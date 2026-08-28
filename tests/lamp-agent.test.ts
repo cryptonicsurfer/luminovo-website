@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAgentReply, withForcedName, runBuildAgent, summarizeBuildOutput, buildSystemPrompt, MAX_ROUNDS,
-  checkCodeSafety, childEnv, buildSucceeded,
+  checkCodeSafety, childEnv, buildSucceeded, solidityProblem,
   type AgentDeps, type AgentInput, type ChatMessage, type BuildResult,
 } from '../src/lib/lamp-agent.ts';
 import { parseAgentStatus, markStale, STALE_RUN_MS } from '../src/lib/lamp-pipeline.ts';
@@ -238,4 +238,31 @@ test('markStale: running utan livstecken blir failed, annars orört', () => {
   assert.equal(markStale({ ...base, state: 'done' }, t + STALE_RUN_MS * 5).state, 'done');
   // utan logg räknas startedAt
   assert.equal(markStale({ ...base, log: [] }, Date.parse(base.startedAt) + STALE_RUN_MS + 1).state, 'failed');
+});
+
+test('solidityProblem: massiv skärm avvisas, ihålig går igenom', () => {
+  const solid = '  matt:       156.24 x 156.24 x 189.34 mm\n  volym:      1391.33 cm3  (~1725 g PLA)';
+  assert.match(solidityProblem(solid) ?? '', /massiv.*38 %.*max 15 %/);
+  const gamed = '  matt:       178.0 x 178.0 x 200.0 mm\n  volym:      1118.23 cm3';
+  assert.match(solidityProblem(gamed) ?? '', /22 %/, 'klump med hål ska också avvisas');
+  const konisk = '  matt:       195.0 x 194.94 x 200.0 mm\n  volym:      521.11 cm3';
+  assert.equal(solidityProblem(konisk), null);
+  const hollow = '  matt:       170.0 x 169.95 x 210.0 mm\n  volym:      316.38 cm3  (~392 g PLA)';
+  assert.equal(solidityProblem(hollow), null);
+  assert.equal(solidityProblem('ingen utskrift'), null);
+});
+
+test('loopen: massivt bygge räknas som fel och skickas tillbaka', async () => {
+  const fix = '### del.py\n```python\nfrom build123d import *\npart = Cylinder(1, 1)\n```';
+  const h = harness([REPLY_BOTH, fix], [
+    { ok: true, output: '  matt:       156.24 x 156.24 x 189.34 mm\n  volym:      1391.33 cm3\n  -> publicerad: /x' },
+    { ok: true, output: '  matt:       170.0 x 170.0 x 210.0 mm\n  volym:      316.0 cm3\n  -> publicerad: /x' },
+  ]);
+  const s = await runBuildAgent(h.input, h.deps);
+  assert.equal(s.state, 'done');
+  assert.equal(s.round, 2);
+  const fb = h.calls[1][h.calls[1].length - 1];
+  const txt = (fb.content as { type: string; text?: string }[]).find((p) => p.type === 'text')?.text ?? '';
+  assert.match(txt, /massiv/);
+  assert.ok(s.log.some((e) => /massiv/.test(e.msg)));
 });

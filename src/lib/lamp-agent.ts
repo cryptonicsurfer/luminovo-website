@@ -112,6 +112,10 @@ KONVENTIONER (samma som build123d-tests/CLAUDE.md):
 - Printkonstanter: bädd 250 × 210 × 220 mm (Z ≤ 220!), minsta vägg 0.8 mm, inga stöd.
   Lampskärm: max 40 cm hög (i praktiken ≤ 210 pga bädden), E27-hål 40.5 mm centrerat i bottenplattan.
 - Bara den printade delen: ingen glödlampa, ingen frostad innerskärm, ingen möbel.
+- SKÄRMEN MÅSTE VARA IHÅLIG: ljuset ska ut och lampan ska få plats. Väggar/lameller
+  1.2–3 mm, öppen struktur eller tunt skal — aldrig en massiv kropp. Riktvärde: volymen
+  ska vara under 15 % av den omslutande cylindern — ett skal med 2 mm vägg landar runt 10 %,
+  en spjälbur runt 7 %. En massiv del avvisas och skickas tillbaka.
 
 BUILD123D-LATHUND (0.11):
   from build123d import *
@@ -197,6 +201,24 @@ export function buildFeedbackMessage(result: BuildResult, round: number): ChatMe
   return { role: 'user', content: parts };
 }
 
+/**
+ * Lampspecifik rimlighetskontroll på build.py-utskriften: en skärm som fyller
+ * mer än MAX_FILL av sin omslutande box är massiv — ser rätt ut utifrån men
+ * släpper inte ut ljus och väger ett kilo. Returnerar ett felmeddelande eller null.
+ */
+export const MAX_FILL = 0.15;   // andel av omslutande cylinder; uppmätt: massiv trumma 0.31–0.38, ihåliga skärmar 0.07–0.10
+export function solidityProblem(output: string): string | null {
+  const m = /matt:\s*([\d.]+)\s*x\s*([\d.]+)\s*x\s*([\d.]+)\s*mm/.exec(output);
+  const v = /volym:\s*([\d.]+)\s*cm3/.exec(output);
+  if (!m || !v) return null;
+  const cyl = (Math.PI / 4) * Number(m[1]) * Number(m[2]) * Number(m[3]) / 1000; // cm3, omslutande cylinder
+  const vol = Number(v[1]);
+  if (!(cyl > 0)) return null;
+  const fill = vol / cyl;
+  if (fill <= MAX_FILL) return null;
+  return `FEL: delen är massiv — volymen ${vol.toFixed(0)} cm3 är ${(fill * 100).toFixed(0)} % av den omslutande cylindern (max ${MAX_FILL * 100} %; ett tunt skal med 2 mm vägg ger ~10 %, en spjälbur ~7 %). Skärmen måste vara ett tunt skal eller en öppen struktur som ljuset går igenom — subtrahera innerkroppen (Mode.SUBTRACT) eller bygg av tunna element. Bottenplattan får vara massiv.`;
+}
+
 /** Radar ur build.py-utskriften som är värda att visa på sidan. */
 export function summarizeBuildOutput(output: string): string[] {
   return output
@@ -272,6 +294,10 @@ export async function runBuildAgent(input: AgentInput, deps: AgentDeps): Promise
       } catch (err) {
         result = { ok: false, output: `Byggkörningen kraschade: ${err instanceof Error ? err.message : String(err)}` };
       }
+    }
+    const solid = result.ok ? solidityProblem(result.output) : null;
+    if (solid) {
+      result = { ...result, ok: false, output: `${result.output.trim()}\n  ${solid}` };
     }
     for (const line of summarizeBuildOutput(result.output)) await log(line);
 
