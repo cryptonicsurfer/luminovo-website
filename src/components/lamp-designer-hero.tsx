@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import OrderForm from './order-form';
 
 /** Speglar ModelInfo i src/lib/lamp-pipeline.ts. */
@@ -13,6 +13,93 @@ interface ModelInfo {
 }
 
 const POLL_MS = 3000;
+
+/**
+ * Minimal rendering av spec.md: rubriker, tabeller, punktlistor, stycken.
+ * Ingen markdown-dependency — specen skrivs av oss och har ett känt format.
+ */
+function SpecView({ text }: { text: string }) {
+  const lines = text.split('\n');
+  const blocks: React.ReactNode[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith('|')) {
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].startsWith('|')) {
+        const cells = lines[i].slice(1, -1).split('|').map((c) => c.trim());
+        if (!cells.every((c) => /^-+$/.test(c))) rows.push(cells);
+        i++;
+      }
+      const [head, ...body] = rows;
+      blocks.push(
+        <div key={i} className="overflow-x-auto my-3">
+          <table className="w-full text-sm">
+            <thead>
+              <tr>{head.map((c, k) => <th key={k} className="text-left font-semibold text-gray-500 pb-2 pr-4">{c}</th>)}</tr>
+            </thead>
+            <tbody>
+              {body.map((r, ri) => (
+                <tr key={ri} className="border-t border-gray-100">
+                  {r.map((c, k) => (
+                    <td key={k} className={`py-1.5 pr-4 align-top ${k === 2 ? 'font-mono text-brand-black' : k === 3 ? 'text-gray-500' : 'text-gray-800'}`}>{c}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+    if (line.startsWith('# ')) blocks.push(<h4 key={i} className="text-lg font-semibold text-brand-black mt-1">{line.slice(2)}</h4>);
+    else if (line.startsWith('## ')) blocks.push(<h5 key={i} className="font-semibold text-brand-black mt-4 mb-1">{line.slice(3)}</h5>);
+    else if (line.startsWith('- ')) {
+      const items: string[] = [];
+      while (i < lines.length && (lines[i].startsWith('- ') || lines[i].startsWith('  '))) {
+        if (lines[i].startsWith('- ')) items.push(lines[i].slice(2)); else items[items.length - 1] += ' ' + lines[i].trim();
+        i++;
+      }
+      blocks.push(<ul key={i} className="list-disc pl-5 text-sm text-gray-700 space-y-1">{items.map((t, k) => <li key={k}>{t}</li>)}</ul>);
+      continue;
+    } else if (line.trim() !== '') {
+      const para: string[] = [line];
+      while (i + 1 < lines.length && lines[i + 1].trim() !== '' && !/^([#|-]|\s)/.test(lines[i + 1])) { para.push(lines[i + 1]); i++; }
+      blocks.push(<p key={i} className="text-sm text-gray-600">{para.join(' ')}</p>);
+    }
+    i++;
+  }
+  return <div className="space-y-2">{blocks}</div>;
+}
+
+/**
+ * React 19 sätter `src` som egenskap på ett redan uppgraderat custom element.
+ * model-viewer dokumenterar attributen, så vi sätter dem själva via ref —
+ * då spelar det ingen roll om skriptet laddats före eller efter renderingen.
+ */
+function ModelViewer({ glb, usdz }: { glb: string; usdz?: string }) {
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.setAttribute('src', glb);
+    if (usdz) el.setAttribute('ios-src', usdz); else el.removeAttribute('ios-src');
+  }, [glb, usdz]);
+  return (
+    <model-viewer
+      ref={ref}
+      alt="3D-modell av lampskärmen"
+      auto-rotate
+      camera-controls
+      ar
+      ar-modes="quick-look webxr scene-viewer"
+      shadow-intensity="1"
+      environment-image="neutral"
+      exposure="1"
+      style={{ width: '100%', height: '100%' }}
+    ></model-viewer>
+  );
+}
 
 function sameState(a: ModelInfo, b: ModelInfo) {
   return a.id === b.id && a.spec === b.spec && JSON.stringify(a.files) === JSON.stringify(b.files);
@@ -204,19 +291,7 @@ export default function LampDesignerHero() {
 
                   {current.files.glb ? (
                     <div className="bg-gradient-to-b from-gray-50 to-gray-100" style={{ height: '500px' }}>
-                      <model-viewer
-                        src={current.urls.glb}
-                        ios-src={current.files.usdz ? current.urls.usdz : undefined}
-                        alt="3D-modell av lampskärmen"
-                        auto-rotate
-                        camera-controls
-                        ar
-                        ar-modes="quick-look webxr scene-viewer"
-                        shadow-intensity="1"
-                        environment-image="neutral"
-                        exposure="1"
-                        style={{ width: '100%', height: '100%' }}
-                      ></model-viewer>
+                      <ModelViewer glb={current.urls.glb} usdz={current.files.usdz ? current.urls.usdz : undefined} />
                     </div>
                   ) : (
                     <div className="mx-6 mb-2 rounded-xl bg-brand-sand/40 px-5 py-4 flex items-center gap-3">
@@ -232,7 +307,7 @@ export default function LampDesignerHero() {
 
                   {current.spec && (
                     <div className="p-6 pt-4">
-                      <pre className="text-xs leading-relaxed text-gray-800 whitespace-pre-wrap font-mono bg-gray-50 rounded-lg p-4 overflow-x-auto">{current.spec}</pre>
+                      <SpecView text={current.spec} />
                     </div>
                   )}
 
@@ -255,7 +330,8 @@ export default function LampDesignerHero() {
                 <div className="flex gap-3">
                   <button
                     onClick={() => setIsOrderFormOpen(true)}
-                    className="flex-1 bg-brand-black text-white font-semibold py-2 px-4 rounded-full hover:bg-gray-800 transition-all text-sm"
+                    className="flex-1 text-white font-semibold py-2 px-4 rounded-full hover:opacity-90 transition-all text-sm"
+                    style={{ backgroundColor: 'var(--brand-black)' }}
                   >
                     Beställ Nu
                   </button>
