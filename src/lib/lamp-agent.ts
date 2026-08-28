@@ -271,7 +271,11 @@ export async function runBuildAgent(input: AgentInput, deps: AgentDeps): Promise
     if (step) status.step = step;
     status.log.push({ t: now().toISOString(), msg } satisfies AgentLogEntry);
     status.updatedAt = now().toISOString();
-    await deps.writeStatus(input.id, status);
+    try {
+      await deps.writeStatus(input.id, status);
+    } catch (err) {
+      console.warn('[agent] kunde inte skriva status:', err instanceof Error ? err.message : err);
+    }
   };
   const finish = async (state: 'done' | 'failed', msg: string) => {
     status.state = state;
@@ -557,15 +561,32 @@ export function replySaver(env: AgentEnv): NonNullable<AgentDeps['saveReply']> {
   };
 }
 
-export async function writeAgentStatus(id: string, status: AgentStatus): Promise<void> {
-  const dir = modelDir(id);
+/**
+ * Hjärtslag, live-strömning och loggrader skriver agent.json samtidigt. Varje
+ * skrivning får därför ett eget tmp-namn och köas per modell — annars hinner
+ * en writer döpa om tmp-filen under en annan (ENOENT, sett i skarp körning).
+ * Ögonblicksbilden tas vid anropet så ordningen bevaras.
+ */
+const writeQueues = new Map<string, Promise<void>>();
+export async function writeAgentStatus(id: string, status: AgentStatus, baseDir?: string): Promise<void> {
+  const dir = modelDir(id, baseDir);
   if (!dir) throw new Error('ogiltigt id');
-  const tmp = path.join(dir, `${MODEL_FILES.agent}.tmp`);
-  await fs.writeFile(tmp, JSON.stringify(status, null, 2));
-  await fs.rename(tmp, path.join(dir, MODEL_FILES.agent));
-  // livstecken: låsets mtime är det som avgör om en körning räknas som död
-  const now = new Date();
-  await fs.utimes(path.join(dir, 'agent.lock'), now, now).catch(() => {});
+  const snapshot = JSON.stringify(status, null, 2);
+  const prev = writeQueues.get(id) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(async () => {
+    const tmp = path.join(dir, `${MODEL_FILES.agent}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`);
+    await fs.writeFile(tmp, snapshot);
+    await fs.rename(tmp, path.join(dir, MODEL_FILES.agent));
+    // livstecken: låsets mtime är det som avgör om en körning räknas som död
+    const now = new Date();
+    await fs.utimes(path.join(dir, 'agent.lock'), now, now).catch(() => {});
+  });
+  writeQueues.set(id, next);
+  try {
+    await next;
+  } finally {
+    if (writeQueues.get(id) === next) writeQueues.delete(id);
+  }
 }
 
 async function readExamples(build123dDir: string): Promise<{ name: string; code: string }[]> {

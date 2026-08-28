@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm, readFile, readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
   parseAgentReply, withForcedName, runBuildAgent, summarizeBuildOutput, buildSystemPrompt, MAX_ROUNDS,
   checkCodeSafety, childEnv, buildSucceeded, solidityProblem, withOneRetry, maxOutputTokens, parseSseStream, reasoningTail, buildFirstMessage,
+  writeAgentStatus,
   type AgentDeps, type AgentInput, type ChatMessage, type BuildResult,
 } from '../src/lib/lamp-agent.ts';
 import { parseAgentStatus, markStale, STALE_RUN_MS } from '../src/lib/lamp-pipeline.ts';
@@ -362,4 +366,19 @@ test('buildFirstMessage: skelettet blir bild 2 när det finns', () => {
   const two = buildFirstMessage({ ...base, skeleton: { base64: 'BB', mimeType: 'image/jpeg' } }).content as { type: string; text?: string }[];
   assert.equal(two.filter((p) => p.type === 'image_url').length, 2);
   assert.match(two[0].text ?? '', /Bild 2: BARA den printade delen/);
+});
+
+test('writeAgentStatus: 60 samtidiga skrivningar utan ENOENT, sista vinner, inga tmp-filer kvar', async () => {
+  const base = await mkdtemp(path.join(tmpdir(), 'agent-'));
+  try {
+    const id = 'lampa-20260828-999999';
+    await mkdir(path.join(base, id));
+    const mk = (n: number) => ({ state: 'running' as const, step: 's', round: n, model: 'm', log: [], startedAt: '2026-08-28T00:00:00.000Z' });
+    await Promise.all(Array.from({ length: 60 }, (_, n) => writeAgentStatus(id, mk(n), base)));
+    const final = JSON.parse(await readFile(path.join(base, id, 'agent.json'), 'utf8'));
+    assert.equal(final.round, 59);
+    assert.deepEqual((await readdir(path.join(base, id))).filter((f) => f.endsWith('.tmp')), []);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
